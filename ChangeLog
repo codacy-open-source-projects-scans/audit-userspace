@@ -1,3 +1,5 @@
+3.1.3
+
 3.1.2
 - When processing a run level change, make auditd exit
 - In auditd, fix return code when rules added in immutable mode
@@ -9,6 +11,7 @@
 - In ausearch, correct subject/object search to be an and if both are given
 - Adjust formats for 64 bit time_t
 - Fix segfault in python bindings around the feed API
+- Add feed_has_data, get_record_num, and get/goto_field_num to python bindings
 
 3.1.1
 - Add user friendly keywords for signals to auditctl

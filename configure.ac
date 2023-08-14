@@ -29,7 +29,7 @@ define([AC_INIT_NOTICE],
 ])
 
 AC_REVISION($Revision: 1.3 $)dnl
-AC_INIT([audit], [3.1.2])
+AC_INIT([audit], [3.9])
 AC_PREREQ([2.50])dnl
 AC_CONFIG_HEADERS([config.h])
 
@@ -100,6 +100,20 @@ AC_COMPILE_IFELSE(
   [ACCESS="no"]
 )
 AC_MSG_RESULT($ACCESS)
+
+AC_MSG_CHECKING(__attr_dealloc_free support)
+AC_COMPILE_IFELSE(
+  [AC_LANG_SOURCE(
+    [[
+      #include <stdio.h>
+      extern char *audit_encode_nv_string(const char *name, const char *value,
+                                          unsigned int vlen)
+                                          __attr_dealloc_free;
+      int main(void) { return 0; }]])],
+  [DEALLOC="yes"],
+  [DEALLOC="no"]
+)
+AC_MSG_RESULT($DEALLOC)
 
 dnl; pthread_yield is used in zos-remote
 OLDLIBS="$LIBS"
@@ -303,20 +317,6 @@ if test $want_gssapi_krb5 = yes; then
 fi
 AM_CONDITIONAL(ENABLE_GSSAPI, test x$want_gssapi_krb5 = xyes)
 
-#systemd
-AC_MSG_CHECKING(whether to enable systemd)
-AC_ARG_ENABLE(systemd,
-	[AS_HELP_STRING([--enable-systemd],[Enable systemd init scripts @<:@default=no@:>@])],
-        [case "${enableval}" in
-         yes) want_systemd="yes" ;;
-          no) want_systemd="no" ;;
-           *) AC_MSG_ERROR(bad value ${enableval} for --enable-systemd) ;;
-         esac],
-	[want_systemd="no"]
-)
-AM_CONDITIONAL(ENABLE_SYSTEMD, test x$want_systemd = xyes)
-AC_MSG_RESULT($want_systemd)
-
 # ids
 AC_MSG_CHECKING(whether to enable experimental options)
 AC_ARG_ENABLE(experimental,
@@ -480,7 +480,7 @@ AC_SUBST(DEBUG)
 AC_SUBST(LIBWRAP_LIBS)
 #AC_SUBST(libev_LIBS)
 
-AC_CONFIG_FILES(Makefile common/Makefile lib/Makefile lib/audit.pc lib/test/Makefile auparse/Makefile auparse/test/Makefile auparse/auparse.pc src/Makefile src/libev/Makefile src/test/Makefile docs/Makefile rules/Makefile init.d/Makefile audisp/Makefile audisp/plugins/Makefile audisp/plugins/af_unix/Makefile audisp/plugins/remote/Makefile audisp/plugins/zos-remote/Makefile audisp/plugins/syslog/Makefile audisp/plugins/ids/Makefile audisp/plugins/ids/rules/Makefile audisp/plugins/statsd/Makefile bindings/Makefile bindings/python/Makefile bindings/python/python2/Makefile bindings/python/python3/Makefile bindings/golang/Makefile bindings/swig/Makefile bindings/swig/src/Makefile bindings/swig/python/Makefile bindings/swig/python3/Makefile tools/Makefile tools/aulast/Makefile tools/aulastlog/Makefile tools/ausyscall/Makefile tools/auvirt/Makefile m4/Makefile)
+AC_CONFIG_FILES(Makefile common/Makefile lib/Makefile lib/audit.pc lib/test/Makefile auparse/Makefile auparse/test/Makefile auparse/auparse.pc src/Makefile src/libev/Makefile src/test/Makefile docs/Makefile rules/Makefile init.d/Makefile audisp/Makefile audisp/plugins/Makefile audisp/plugins/af_unix/Makefile audisp/plugins/remote/Makefile audisp/plugins/zos-remote/Makefile audisp/plugins/syslog/Makefile audisp/plugins/ids/Makefile audisp/plugins/ids/rules/Makefile audisp/plugins/statsd/Makefile bindings/Makefile bindings/python/Makefile bindings/python/python2/Makefile bindings/python/python3/Makefile bindings/golang/Makefile bindings/swig/Makefile bindings/swig/src/Makefile bindings/swig/python/Makefile bindings/swig/python3/Makefile tools/Makefile tools/aulast/Makefile tools/aulastlog/Makefile tools/ausyscall/Makefile m4/Makefile)
 AC_OUTPUT
 
 echo .
@@ -493,4 +493,5 @@ echo "
   Compiler flags:
 `echo $CFLAGS | fmt -w 50 | sed 's,^,                          ,'`
   __attr_access support:  $ACCESS
+  __attr_dealloc_free support:  $DEALLOC
 "

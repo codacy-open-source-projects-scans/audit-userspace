@@ -1,6 +1,6 @@
 Summary: User space tools for kernel auditing
 Name: audit
-Version: 3.1.2
+Version: 3.9
 Release: 1%{dist}
 License: GPL-2.0-or-later AND LGPL-2.0-or-later
 Group: System Environment/Daemons
@@ -93,7 +93,7 @@ behavior.
 	   --with-python3=yes \
 	   --enable-gssapi-krb5=yes --with-arm --with-aarch64 \
 	   --with-libcap-ng=yes --without-golang --enable-zos-remote \
-	   --enable-systemd --enable-experimental --with-io_uring
+	   --enable-experimental --with-io_uring
 
 make CFLAGS="%{optflags}" %{?_smp_mflags}
 
@@ -196,10 +196,8 @@ fi
 %attr(644,root,root) %{_mandir}/man8/auditd.8.gz
 %attr(644,root,root) %{_mandir}/man8/aureport.8.gz
 %attr(644,root,root) %{_mandir}/man8/ausearch.8.gz
-%attr(644,root,root) %{_mandir}/man8/autrace.8.gz
 %attr(644,root,root) %{_mandir}/man8/aulast.8.gz
 %attr(644,root,root) %{_mandir}/man8/aulastlog.8.gz
-%attr(644,root,root) %{_mandir}/man8/auvirt.8.gz
 %attr(644,root,root) %{_mandir}/man8/augenrules.8.gz
 %attr(644,root,root) %{_mandir}/man8/ausyscall.8.gz
 %attr(644,root,root) %{_mandir}/man7/audit.rules.7.gz
@@ -210,12 +208,10 @@ fi
 %attr(755,root,root) /sbin/auditd
 %attr(755,root,root) /sbin/ausearch
 %attr(755,root,root) /sbin/aureport
-%attr(750,root,root) /sbin/autrace
 %attr(755,root,root) /sbin/augenrules
 %attr(755,root,root) %{_bindir}/aulast
 %attr(755,root,root) %{_bindir}/aulastlog
 %attr(755,root,root) %{_bindir}/ausyscall
-%attr(755,root,root) %{_bindir}/auvirt
 %attr(644,root,root) %{_unitdir}/auditd.service
 %attr(750,root,root) %dir %{_libexecdir}/initscripts/legacy-actions/auditd
 %attr(750,root,root) %{_libexecdir}/initscripts/legacy-actions/auditd/condrestart
@@ -265,6 +261,6 @@ fi
 
 
 %changelog
-* Thu Apr 27 2023 Steve Grubb <sgrubb@redhat.com> 3.1.2-1
+* Sun Aug 06 2023 Steve Grubb <sgrubb@redhat.com> 3.9-1
 - New upstream release
 
