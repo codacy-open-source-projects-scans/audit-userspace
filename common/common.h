@@ -1,5 +1,5 @@
 /* audit-fgets.h -- a replacement for glibc's fgets
- * Copyright 2018,2022 Red Hat Inc.
+ * Copyright 2018-23 Red Hat Inc.
  * All Rights Reserved.
  *
  * This library is free software; you can redistribute it and/or
@@ -38,6 +38,7 @@ int audit_fgets(char *buf, size_t blen, int fd)
 
 char *audit_strsplit_r(char *s, char **savedpp);
 char *audit_strsplit(char *s);
+int audit_is_last_record(int type);
 
 AUDIT_HIDDEN_END
 #endif

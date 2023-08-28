@@ -25,10 +25,10 @@ CONFIG_CLEAN_FILES = *.rej *.orig
 EXTRA_DIST = auditd.service auditd.conf auditd.cron \
 	libaudit.conf auditd.condrestart \
 	auditd.reload auditd.restart auditd.resume \
-	auditd.rotate auditd.state auditd.stop \
-	audit-stop.rules augenrules audit-functions
+	auditd.rotate auditd.state auditd.stop audit-rules.service \
+	audit-stop.rules augenrules
 libconfig = libaudit.conf
-initdir = /usr/lib/systemd/system
+initdir = $(prefix)/lib/systemd/system
 legacydir = $(libexecdir)/initscripts/legacy-actions/auditd
 
 auditdir = $(sysconfdir)/audit
@@ -42,8 +42,8 @@ install-data-hook:
 install-exec-hook:
 	mkdir -p ${DESTDIR}${initdir}
 	mkdir -p ${DESTDIR}${legacydir}
-	mkdir -p ${DESTDIR}${libexecdir}
 	$(INSTALL_SCRIPT) -D -m 644 ${srcdir}/auditd.service ${DESTDIR}${initdir}
+	$(INSTALL_SCRIPT) -D -m 644 ${srcdir}/audit-rules.service ${DESTDIR}${initdir}
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.rotate ${DESTDIR}${legacydir}/rotate
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.resume ${DESTDIR}${legacydir}/resume
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.reload ${DESTDIR}${legacydir}/reload
@@ -51,13 +51,13 @@ install-exec-hook:
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.stop ${DESTDIR}${legacydir}/stop
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.restart ${DESTDIR}${legacydir}/restart
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.condrestart ${DESTDIR}${legacydir}/condrestart
-	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/audit-functions ${DESTDIR}${libexecdir}
 	chmod 0755 $(DESTDIR)$(sbindir)/augenrules
 
 
 uninstall-hook:
 	rm ${DESTDIR}${sysconfdir}/${libconfig}
 	rm ${DESTDIR}${initdir}/auditd.service
+	rm ${DESTDIR}${initdir}/audit-rules.service
 	rm ${DESTDIR}${legacydir}/rotate
 	rm ${DESTDIR}${legacydir}/resume
 	rm ${DESTDIR}${legacydir}/reload
@@ -65,4 +65,3 @@ uninstall-hook:
 	rm ${DESTDIR}${legacydir}/stop
 	rm ${DESTDIR}${legacydir}/restart
 	rm ${DESTDIR}${legacydir}/condrestart
-

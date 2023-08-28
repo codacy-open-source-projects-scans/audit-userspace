@@ -136,50 +136,6 @@ if test x"$GCC" = x"yes"; then
     esac
 fi
 
-AC_MSG_CHECKING(whether to create python bindings)
-AC_ARG_WITH(python,
-AS_HELP_STRING([--with-python],[enable building python bindings]),
-use_python=$withval,
-use_python=auto)
-if test "x$use_python" = xno ; then
-	python_found="no"
-	AC_MSG_RESULT(no)
-else
-AC_MSG_RESULT(testing)
-
-# Try to find a versioned Python2 interpreter,
-# if not explicitly specified by the user.
-if test "x$PYTHON" = "x"; then
-  AC_MSG_CHECKING([for versioned Python2 interpreter])
-  AC_MSG_RESULT([])
-  for python2 in python2 python2.7 python2.6 python2.5 python2.4 python2.3 python2.2 python2.1 python2.0; do
-    AC_PATH_PROG([PYTHON], [$python2])
-    if test "x$PYTHON" != "x"; then
-      break;
-    fi
-  done
-fi
-
-# Setup Python2 with the interpreter found previously.
-AM_PATH_PYTHON
-PYINCLUDEDIR=`python${am_cv_python_version} -c "from distutils import sysconfig; print(sysconfig.get_config_var('INCLUDEPY'))"`
-if test -f ${PYINCLUDEDIR}/Python.h ; then
-	python_found="yes"
-	AC_SUBST(PYINCLUDEDIR)
-	pybind_dir="python"
-	AC_SUBST(pybind_dir)
-	AC_MSG_NOTICE(Python bindings will be built)
-else
-	python_found="no"
-	if test "x$use_python" = xyes ; then
-		AC_MSG_ERROR([Python explicitly requested and python headers were not found])
-	else
-		AC_MSG_WARN(Python headers not found - python bindings will not be made)
-	fi
-fi
-fi
-AM_CONDITIONAL(HAVE_PYTHON, test ${python_found} = "yes")
-
 withval=""
 AC_MSG_CHECKING(whether to create python3 bindings)
 AC_ARG_WITH(python3,
@@ -480,7 +436,7 @@ AC_SUBST(DEBUG)
 AC_SUBST(LIBWRAP_LIBS)
 #AC_SUBST(libev_LIBS)
 
-AC_CONFIG_FILES(Makefile common/Makefile lib/Makefile lib/audit.pc lib/test/Makefile auparse/Makefile auparse/test/Makefile auparse/auparse.pc src/Makefile src/libev/Makefile src/test/Makefile docs/Makefile rules/Makefile init.d/Makefile audisp/Makefile audisp/plugins/Makefile audisp/plugins/af_unix/Makefile audisp/plugins/remote/Makefile audisp/plugins/zos-remote/Makefile audisp/plugins/syslog/Makefile audisp/plugins/ids/Makefile audisp/plugins/ids/rules/Makefile audisp/plugins/statsd/Makefile bindings/Makefile bindings/python/Makefile bindings/python/python2/Makefile bindings/python/python3/Makefile bindings/golang/Makefile bindings/swig/Makefile bindings/swig/src/Makefile bindings/swig/python/Makefile bindings/swig/python3/Makefile tools/Makefile tools/aulast/Makefile tools/aulastlog/Makefile tools/ausyscall/Makefile m4/Makefile)
+AC_CONFIG_FILES(Makefile common/Makefile lib/Makefile lib/audit.pc lib/test/Makefile auparse/Makefile auparse/test/Makefile auparse/auparse.pc src/Makefile src/libev/Makefile src/test/Makefile docs/Makefile rules/Makefile init.d/Makefile audisp/Makefile audisp/plugins/Makefile audisp/plugins/af_unix/Makefile audisp/plugins/remote/Makefile audisp/plugins/zos-remote/Makefile audisp/plugins/syslog/Makefile audisp/plugins/ids/Makefile audisp/plugins/ids/rules/Makefile audisp/plugins/statsd/Makefile bindings/Makefile bindings/python/Makefile bindings/python/python3/Makefile bindings/golang/Makefile bindings/swig/Makefile bindings/swig/src/Makefile bindings/swig/python3/Makefile tools/Makefile tools/aulast/Makefile tools/aulastlog/Makefile tools/ausyscall/Makefile m4/Makefile)
 AC_OUTPUT
 
 echo .
