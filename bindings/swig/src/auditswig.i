@@ -1,6 +1,6 @@
 /* Author: Dan Walsh
  *
- * Copyright (C) 2005,2006,2009 Red Hat
+ * Copyright (C) 2005,2006,2009,2023 Red Hat
  * 
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -20,7 +20,7 @@
 
 %module audit
 %{
-        #include "../lib/libaudit.h"
+        #include "../lib/audit_logging.h"
 %}
 
 #if defined(SWIGPYTHON)
@@ -43,8 +43,12 @@ typedef unsigned uid_t;
  * generating setters against them: https://github.com/swig/swig/issues/1699
  */
 %ignore audit_rule_data::buf;
+
 %include "/usr/include/linux/audit.h"
 #define __extension__ /*nothing*/
 %include <stdint.i>
-%include "../lib/libaudit.h"
+%include "../lib/audit-records.h"
+%include "../lib/audit_logging.h"
+extern int  audit_open(void);
+extern void audit_close(int fd);
 

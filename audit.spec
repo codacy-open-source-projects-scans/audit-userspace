@@ -14,9 +14,10 @@ BuildRequires: systemd
 
 Requires: %{name}-libs = %{version}-%{release}
 Requires: %{name}-rules%{?_isa} = %{version}-%{release}
-Requires(post): systemd coreutils procps-ng
+Requires(post): systemd coreutils
 Requires(preun): systemd initscripts-service
-Requires(postun): systemd coreutils initscripts-service
+Requires(postun): systemd coreutils
+Recommends: initscripts-service
 
 %description
 The audit package contains the user space utilities for
@@ -144,7 +145,7 @@ fi
 %preun
 %systemd_preun auditd.service
 if [ $1 -eq 0 ]; then
-   /sbin/service auditd stop > /dev/null 2>&1
+    auditctl --signal stop
 fi
 
 %preun rules
@@ -155,7 +156,11 @@ fi
 
 %postun
 if [ $1 -ge 1 ]; then
-   /sbin/service auditd condrestart > /dev/null 2>&1 || :
+    state=$(systemctl status auditd | awk '/Active:/ { print $2 }')
+    if [ $state = "active" ] ; then
+        /sbin/auditctl --signal stop
+        systemctl start auditd
+    fi
 fi
 
 %files libs
@@ -170,7 +175,7 @@ fi
 %{_libdir}/libaudit.so
 %{_libdir}/libauparse.so
 %{_includedir}/libaudit.h
-%{_includedir}/audit-logging.h
+%{_includedir}/audit_logging.h
 %{_includedir}/audit-records.h
 %{_includedir}/auparse.h
 %{_includedir}/auparse-defs.h
