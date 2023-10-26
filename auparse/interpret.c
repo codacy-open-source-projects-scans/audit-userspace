@@ -89,6 +89,7 @@
 #include "famtabs.h"
 #include "fcntl-cmdtabs.h"
 #include "flagtabs.h"
+#include "fsconfigs.h"
 #include "ipctabs.h"
 #include "ipccmdtabs.h"
 #include "mmaptabs.h"
@@ -1831,6 +1832,28 @@ static const char *print_mount(const char *val)
 	return strdup(buf);
 }
 
+static const char *print_fsconfig(const char *val)
+{
+	char *out;
+	const char *s;
+	int cmd;
+
+	errno = 0;
+	cmd = strtoul(val, NULL, 16);
+	if (errno) {
+		if (asprintf(&out, "conversion error(%s)", val) < 0)
+			out = NULL;
+		return out;
+	}
+
+	s = fsconfig_i2s(cmd);
+	if (s != NULL)
+		return strdup(s);
+	if (asprintf(&out, "unknown-fsconfig-operation(%d)", cmd) < 0)
+		out = NULL;
+	return out;
+}
+
 static const char *print_rlimit(const char *val)
 {
 	int i;
@@ -2557,6 +2580,15 @@ static const char *print_a1(const char *val, const idata *id)
 				return print_mode_short(val, 16);
 			else if (strncmp(sys, "fcntl", 5) == 0)
 				return print_fcntl_cmd(val);
+			else if (strncmp(sys, "fsconfig", 5) == 0)
+				return print_fsconfig(val);
+			else if (strncmp(sys, "fsopen", 6) == 0) {
+				if (strcmp(val, "1") == 0)
+					return strdup("FSOPEN_CLOEXEC");
+			} else if (strncmp(sys, "fsmount", 7) == 0) {
+				if (strcmp(val, "1") == 0)
+					return strdup("FSMOUNT_CLOEXEC");
+			}
 		} else if (*sys == 'c') {
 			if (strcmp(sys, "chmod") == 0)
 				return print_mode_short(val, 16);
@@ -2675,6 +2707,8 @@ static const char *print_a2(const char *val, const idata *id)
 				return print_mode_short(val, 16);
 			else if (strncmp(sys, "faccessat", 9) == 0)
 				return print_access(val);
+			else if (strncmp(sys, "fsmount", 7) == 0)
+				print_mount(val);
 		} else if (*sys == 's') {
 			if (strcmp(sys, "setresuid") == 0)
 				return print_uid(val, 16);
@@ -2695,6 +2729,8 @@ static const char *print_a2(const char *val, const idata *id)
 				return print_mode_short(val, 16);
 			else if (strcmp(sys, "mprotect") == 0)
 				return print_prot(val, 0);
+			else if (strcmp(sys, "move_mount") == 0)
+				return print_dirfd(val);
 			else if ((strcmp(sys, "mq_open") == 0) &&
 						(id->a1 & O_CREAT))
 				return print_mode_short(val, 16);

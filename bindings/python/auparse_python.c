@@ -158,7 +158,7 @@ AuEvent_get_host(AuEvent *self, void *closure)
     }
 }
 
-static PyGetSetDef AuEvent_getseters[] = {
+static PyGetSetDef AuEvent_getsetters[] = {
     {"sec",    (getter)AuEvent_get_sec,    (setter)NULL, "Event seconds", NULL},
     {"milli",  (getter)AuEvent_get_milli,  (setter)NULL, "millisecond of the timestamp", NULL},
     {"serial", (getter)AuEvent_get_serial, (setter)NULL, "Serial number of the event", NULL},
@@ -225,7 +225,7 @@ static PyTypeObject AuEventType = {
     .tp_doc = AuEvent_doc,
     .tp_methods = AuEvent_methods,
     .tp_members = AuEvent_members,
-    .tp_getset = AuEvent_getseters,
+    .tp_getset = AuEvent_getsetters,
 };
 
 static PyObject *
@@ -290,7 +290,11 @@ static void auparse_callback(auparse_state_t *au,
     if (debug) printf("<< auparse_callback\n");
     arglist = Py_BuildValue("OiO", cb->py_AuParser, cb_event_type,
 			    cb->user_data);
+#if PY_MINOR_VERSION >= 13
+    result = PyObject_CallObject(cb->func, arglist);
+#else
     result = PyEval_CallObject(cb->func, arglist);
+#endif
     Py_DECREF(arglist);
     Py_XDECREF(result);
 }
@@ -2277,7 +2281,7 @@ AuParser_interpret_sock_address(AuParser *self)
 }
 
 static
-PyGetSetDef AuParser_getseters[] = {
+PyGetSetDef AuParser_getsetters[] = {
     {NULL}  /* Sentinel */
 };
 
@@ -2380,7 +2384,7 @@ static PyTypeObject AuParserType = {
     .tp_doc = AuParser_doc,
     .tp_methods = AuParser_methods,
     .tp_members = AuParser_members,
-    .tp_getset = AuParser_getseters,
+    .tp_getset = AuParser_getsetters,
     .tp_init = (initproc)AuParser_init,
     .tp_new = AuParser_new,
 };

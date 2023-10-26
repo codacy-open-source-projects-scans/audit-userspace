@@ -290,6 +290,8 @@ static int audit_setup_watch_name(struct audit_rule_data **rulep, char *path)
 	if (audit_add_watch_dir(type, rulep, path)) 
 		return -1;
 
+	if (add != AUDIT_FILTER_UNSET)
+		audit_msg(LOG_INFO, "Old style watch rules are slower");
 	return 1;
 }
 
@@ -473,7 +475,7 @@ static int send_signal(const char *optarg)
 
 	if (signal == 0) {
 		audit_msg(LOG_ERR, "%s is an unsupported signal", optarg);
-		return -1;
+		exit(1);
 	}
 
 	// Request status so that we can find the pid
@@ -481,7 +483,7 @@ static int send_signal(const char *optarg)
 	if (retval == -1) {
 		if (errno == ECONNREFUSED)
 			audit_msg(LOG_INFO, "The audit system is disabled");
-		return -1;
+		exit(1);
 	}
 
 	// Receive the netlink info
@@ -511,7 +513,7 @@ static int send_signal(const char *optarg)
 				if (rep.status->pid == 0) {
 					audit_msg(LOG_INFO,
 						"Auditd is not running");
-					return -2;
+					exit(2);
 				}
 #ifdef SYS_pidfd_open
 				retval = sure_kill(rep.status->pid, signal);
@@ -522,14 +524,14 @@ static int send_signal(const char *optarg)
 					audit_msg(LOG_WARNING,
 				        "Failed sending signal to auditd (%s)",
 						 strerror(errno));
-					return -1;
+					exit(1);
 				} else
 					return -2;
 			}
 		}
 	}
 	audit_msg(LOG_WARNING, "Failed sending signal to auditd (timeout)");
-	return -1;
+	exit(1);
 }
 
 static int report_status(void)
@@ -552,36 +554,6 @@ static int report_status(void)
 	}
 	get_reply();
 	return -2;
-}
-
-static int parse_syscall(const char *optarg)
-{
-	int retval = 0;
-	char *saved;
-
-	if (strchr(optarg, ',')) {
-		char *ptr, *tmp = strdup(optarg);
-		if (tmp == NULL)
-			return -1;
-		ptr = strtok_r(tmp, ",", &saved);
-		while (ptr) {
-			retval = audit_rule_syscallbyname_data(rule_new, ptr);
-			if (retval != 0) {
-				if (retval == -1) {
-					audit_msg(LOG_ERR,
-						"Syscall name unknown: %s", 
-						ptr);
-					retval = -3; // error reported
-				}
-				break;
-			}
-			ptr = strtok_r(NULL, ",", &saved);
-		}
-		free(tmp);
-		return retval;
-	}
-
-	return audit_rule_syscallbyname_data(rule_new, optarg);
 }
 
 #ifdef WITH_IO_URING
@@ -918,7 +890,7 @@ static int setopt(int count, int lineno, char *vars[])
 				_audit_elf = elf;
 			}
 		}
-		rc = parse_syscall(optarg);
+		rc = _audit_parse_syscall(optarg, rule_new);
 		switch (rc)
 		{
 			case 0:
