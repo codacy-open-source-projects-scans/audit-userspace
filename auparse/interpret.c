@@ -325,7 +325,7 @@ static void key_escape(const char *orig, char *dest, auparse_esc_t escape_mode)
 static int is_int_string(const char *str)
 {
 	while (*str) {
-		if (!isdigit(*str))
+		if (!isdigit((unsigned char)*str))
 			return 0;
 		str++;
 	}
@@ -366,6 +366,8 @@ char *au_unescape(char *buf)
 	// strlen(buf) / 2.
 	olen = strlen(buf);
 	str = malloc(olen+1);
+	if (!str)
+		return NULL;
 
         saved = *ptr;
         *ptr = 0;
@@ -1483,7 +1485,7 @@ static const char *print_success(const char *val)
 {
         int res;
 
-	if (isdigit(*val)) {
+	if (isdigit((unsigned char)*val)) {
 	        errno = 0;
 		res = strtoul(val, NULL, 10);
 	        if (errno) {
@@ -1952,7 +1954,6 @@ static char *print_dirfd(const char *val)
 	errno = 0;
 	uint32_t i = strtoul(val, NULL, 16);
 	if (errno) {
-		char *out;
 		if (asprintf(&out, "conversion error(%s)", val) < 0)
 			out = NULL;
 		return out;
@@ -2300,7 +2301,7 @@ static const char *print_ioctl_req(const char *val)
 	return out;
 }
 
-static const char *fanotify[3]= { "unknown", "allow", "deny" };
+static const char *fanotify[3] = { "unknown", "allow", "deny" };
 static const char *aulookup_fanotify(unsigned s)
 {
 	switch (s)
@@ -2318,7 +2319,7 @@ static const char *print_fanotify(const char *val)
 {
         int res;
 
-	if (isdigit(*val)) {
+	if (isdigit((unsigned char)*val)) {
 	        errno = 0;
 		res = strtoul(val, NULL, 10);
 	        if (errno) {
@@ -2416,7 +2417,7 @@ static const char *print_trust(const char *val)
 	return out;
 }
 
-// fan_type always preceeds fan_info
+// fan_type always precedes fan_info
 static int last_type = 2;
 static const char *print_fan_type(const char *val)
 {

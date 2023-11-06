@@ -1128,7 +1128,7 @@ try_again:
 				return 25;
 			ptr = str + 4;
 			term = ptr;
-			while (isdigit(*term))
+			while (isdigit((unsigned char)*term))
 				term++;
 			if (term == ptr)
 				return 14;
@@ -1711,7 +1711,7 @@ static int parse_sockaddr(const lnode *n, search_items *s)
 				if (len != sizeof(saddr->sa_family) &&
 				    len < 4) {
 					fprintf(stderr,
-						"sun_path len too short (%d)\n",
+						"sun_path len too short (%u)\n",
 						len);
 					return 4;
 				}
@@ -2435,7 +2435,7 @@ static int parse_simple_message(const lnode *n, search_items *s)
 
 	// defaulting this to 1 for these messages. The kernel generally
 	// does not log the res since it can be nothing but success. 
-	// But it can still be overriden below if res= is found in the event
+	// But it can still be overridden below if res= is found in the event
 	if (n->type == AUDIT_CONFIG_CHANGE) 
 		s->success = S_SUCCESS;
 

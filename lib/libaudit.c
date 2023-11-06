@@ -110,7 +110,7 @@ static const struct kw_pair keywords[] =
 static int audit_priority(int xerrno)
 {
 	/* If they've compiled their own kernel and did not include
-	 * the audit susbsystem, they will get ECONNREFUSED. We'll
+	 * the audit subsystem, they will get ECONNREFUSED. We'll
 	 * demote the message to debug so its not lost entirely. */
 	if (xerrno == ECONNREFUSED)
 		return LOG_DEBUG;
@@ -221,7 +221,7 @@ static int load_libaudit_config(const char *path)
 	char buf[128];
 
 	/* open the file */
-	rc = open(path, O_NOFOLLOW|O_RDONLY);
+	rc = open(path, O_NOFOLLOW|O_RDONLY|O_CLOEXEC);
 	if (rc < 0) {
 		if (errno != ENOENT) {
 			audit_msg(LOG_ERR, "Error opening %s (%s)",
@@ -249,6 +249,11 @@ static int load_libaudit_config(const char *path)
 		close(fd);
 		return 1;
 	}
+	if (st.st_gid != 0 && (st.st_mode & S_IWGRP) == S_IWGRP) {
+		audit_msg(LOG_ERR, "Error - %s is group writable", path);
+		close(fd);
+		return 1;
+	}
 	if ((st.st_mode & S_IWOTH) == S_IWOTH) {
 		audit_msg(LOG_ERR, "Error - %s is world writable", path);
 		close(fd);
@@ -261,7 +266,7 @@ static int load_libaudit_config(const char *path)
 	}
 
 	/* it's ok, read line by line */
-	f = fdopen(fd, "rm");
+	f = fdopen(fd, "rme");
 	if (f == NULL) {
 		audit_msg(LOG_ERR, "Error - fdopen failed (%s)",
 			strerror(errno));
@@ -630,7 +635,7 @@ static void load_feature_bitmap(void)
 	}
 
 #if defined(HAVE_STRUCT_AUDIT_STATUS_FEATURE_BITMAP)
-	if ((rc = audit_request_status(fd)) > 0) {
+	if (audit_request_status(fd) > 0) {
 		struct audit_reply rep;
 		int i;
 		int timeout = 40; /* tenths of seconds */
@@ -657,12 +662,14 @@ static void load_feature_bitmap(void)
 
 				/* Found it... */
 				features_bitmap = rep.status->feature_bitmap;
+				audit_close(fd);
 				return;
 			}
 		}
 	}
 #endif
 	features_bitmap = AUDIT_FEATURES_UNSUPPORTED;
+	audit_close(fd);
 }
 
 uint32_t audit_get_features(void)
@@ -696,14 +703,14 @@ int audit_request_signal_info(int fd)
 	return rc;
 }
 
-char *audit_format_signal_info(char *buf, int len, char *op,
-			       struct audit_reply *rep, char *res)
+char *audit_format_signal_info(char *buf, int len, const char *op,
+			       const struct audit_reply *rep, const char *res)
 {
 	struct stat sb;
 	char path[32], ses[16];
-	int rlen;
+	ssize_t rlen;
 	snprintf(path, sizeof(path), "/proc/%u", rep->signal_info->pid);
-	int fd = open(path, O_RDONLY);
+	int fd = open(path, O_RDONLY|O_DIRECTORY|O_CLOEXEC);
 	if (fd >= 0) {
 		if (fstat(fd, &sb) < 0)
 			sb.st_uid = -1;
@@ -712,7 +719,7 @@ char *audit_format_signal_info(char *buf, int len, char *op,
 		sb.st_uid = -1;
 	snprintf(path, sizeof(path), "/proc/%u/sessionid",
 		 rep->signal_info->pid);
-	fd = open(path, O_RDONLY, rep->signal_info->pid);
+	fd = open(path, O_RDONLY|O_CLOEXEC, rep->signal_info->pid);
 	if (fd < 0)
 		strcpy(ses, "4294967295");
 	else {
@@ -720,7 +727,7 @@ char *audit_format_signal_info(char *buf, int len, char *op,
 			rlen = read(fd, ses, sizeof(ses));
 		} while (rlen < 0 && errno == EINTR);
 		close(fd);
-		if (rlen < 0 || rlen >= sizeof(ses))
+		if (rlen < 0 || (size_t)rlen >= sizeof(ses))
 			strcpy(ses, "4294967295");
 		else
 			ses[rlen] = 0;
@@ -743,7 +750,7 @@ int audit_update_watch_perms(struct audit_rule_data *rule, int perms)
 
 	if (rule->field_count < 1) {
 		audit_msg(LOG_ERR,
-			 "Permissions should be preceeded by other fields");
+			 "Permissions should be preceded by other fields");
 		return -1;
 	}
 
@@ -783,18 +790,18 @@ int audit_add_watch_dir(int type, struct audit_rule_data **rulep,
 	struct audit_rule_data *rule = *rulep;
 
 	if (rule && rule->field_count) {
-		audit_msg(LOG_ERR, "Rule is not empty\n");
+		audit_msg(LOG_ERR, "Rule is not empty");
 		return -1;
 	}
 	if (type != AUDIT_WATCH && type != AUDIT_DIR) {
-		audit_msg(LOG_ERR, "Invalid type used\n");
+		audit_msg(LOG_ERR, "Invalid type used");
 		return -1;
 	}
 
 	*rulep = realloc(rule, len + sizeof(*rule));
 	if (*rulep == NULL) {
 		free(rule);
-		audit_msg(LOG_ERR, "Cannot realloc memory!\n");
+		audit_msg(LOG_ERR, "Cannot realloc memory!");
 		return -1;
 	}
 	rule = *rulep;
@@ -884,9 +891,12 @@ int audit_make_equivalent(int fd, const char *mount_point,
 	struct {
 		uint32_t sizes[2];
 		unsigned char buf[];
-	} *cmd = malloc(sizeof(*cmd) + len1 + len2);
+	} *cmd = calloc(1, sizeof(*cmd) + len1 + len2);
 
-	memset(cmd, 0, sizeof(*cmd) + len1 + len2);
+	if (!cmd) {
+		audit_msg(LOG_ERR, "Cannot allocate memory!");
+		return -ENOMEM;
+	}
 
 	cmd->sizes[0] = len1;
 	cmd->sizes[1] = len2;
@@ -909,18 +919,19 @@ int audit_make_equivalent(int fd, const char *mount_point,
 uid_t audit_getloginuid(void)
 {
 	uid_t uid;
-	int len, in;
+	int in;
+	ssize_t len;
 	char buf[16];
 
 	errno = 0;
-	in = open("/proc/self/loginuid", O_NOFOLLOW|O_RDONLY);
+	in = open("/proc/self/loginuid", O_NOFOLLOW|O_RDONLY|O_CLOEXEC);
 	if (in < 0)
 		return -1;
 	do {
 		len = read(in, buf, sizeof(buf));
 	} while (len < 0 && errno == EINTR);
 	close(in);
-	if (len < 0 || len >= sizeof(buf))
+	if (len < 0 || (size_t)len >= sizeof(buf))
 		return -1;
 	buf[len] = 0;
 	errno = 0;
@@ -941,7 +952,7 @@ int audit_setloginuid(uid_t uid)
 
 	errno = 0;
 	count = snprintf(loginuid, sizeof(loginuid), "%u", uid);
-	o = open("/proc/self/loginuid", O_NOFOLLOW|O_WRONLY|O_TRUNC);
+	o = open("/proc/self/loginuid", O_NOFOLLOW|O_WRONLY|O_TRUNC|O_CLOEXEC);
 	if (o >= 0) {
 		int block, offset = 0;
 
@@ -973,18 +984,19 @@ int audit_setloginuid(uid_t uid)
 uint32_t audit_get_session(void)
 {
 	uint32_t ses;
-	int len, in;
+	int in;
+	ssize_t len;
 	char buf[16];
 
 	errno = 0;
-	in = open("/proc/self/sessionid", O_NOFOLLOW|O_RDONLY);
+	in = open("/proc/self/sessionid", O_NOFOLLOW|O_RDONLY|O_CLOEXEC);
 	if (in < 0)
 		return -2;
 	do {
 		len = read(in, buf, sizeof(buf));
 	} while (len < 0 && errno == EINTR);
 	close(in);
-	if (len < 0 || len >= sizeof(buf))
+	if (len < 0 || (size_t)len >= sizeof(buf))
 		return -2;
 	buf[len] = 0;
 	errno = 0;
@@ -995,7 +1007,7 @@ uint32_t audit_get_session(void)
 		return ses;
 }
 
-int audit_rule_syscall_data(struct audit_rule_data *rule, int scall)
+static int audit_rule_syscall_data(struct audit_rule_data *rule, int scall)
 {
 	int word = AUDIT_WORD(scall);
 	int bit  = AUDIT_BIT(scall);
@@ -1026,7 +1038,7 @@ int audit_rule_syscallbyname_data(struct audit_rule_data *rule,
 		return -2;
 	nr = audit_name_to_syscall(scall, machine);
 	if (nr < 0) {
-		if (isdigit(scall[0]))
+		if (isdigit((unsigned char)scall[0]))
 			nr = strtol(scall, NULL, 0);
 	}
 	if (nr >= 0)
@@ -1051,7 +1063,7 @@ int audit_rule_io_uringbyname_data(struct audit_rule_data *rule,
 	}
 	nr = audit_name_to_uringop(scall);
 	if (nr < 0) {
-		if (isdigit(scall[0]))
+		if (isdigit((unsigned char)scall[0]))
 			nr = strtol(scall, NULL, 0);
 	}
 	if (nr >= 0)
@@ -1522,7 +1534,7 @@ static int audit_add_perm_syscalls(int perm, struct audit_rule_data *rule)
 		_audit_syscalladded = 1;
 		break;
 	case -1: // Should never happen
-		audit_msg(LOG_ERR, "Syscall name unknown: %s", syscall);
+		audit_msg(LOG_ERR, "Syscall name unknown: %s", syscalls);
 		break;
 	default: // Error reported - do nothing here
 		break;
@@ -1639,11 +1651,11 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 		case AUDIT_OBJ_UID:
 			// Do positive & negative separate for 32 bit systems
 			vlen = strlen(v);
-			if (isdigit((char)*(v)))
+			if (isdigit((unsigned char)*(v)))
 				rule->values[rule->field_count] =
 					strtoul(v, NULL, 0);
 			else if (vlen >= 2 && *(v)=='-' &&
-						(isdigit((char)*(v+1))))
+						(isdigit((unsigned char)*(v+1))))
 				rule->values[rule->field_count] =
 					strtol(v, NULL, 0);
 			else {
@@ -1663,7 +1675,7 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 		case AUDIT_SGID:
 		case AUDIT_FSGID:
 		case AUDIT_OBJ_GID:
-			if (isdigit((char)*(v)))
+			if (isdigit((unsigned char)*(v)))
 				rule->values[rule->field_count] =
 					strtol(v, NULL, 0);
 			else {
@@ -1679,11 +1691,11 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 			if (flags != AUDIT_FILTER_EXIT)
 				return -EAU_EXITONLY;
 			vlen = strlen(v);
-			if (isdigit((char)*(v)))
+			if (isdigit((unsigned char)*(v)))
 				rule->values[rule->field_count] =
 					strtol(v, NULL, 0);
 			else if (vlen >= 2 && *(v)=='-' &&
-						(isdigit((char)*(v+1))))
+						(isdigit((unsigned char)*(v+1))))
 				rule->values[rule->field_count] =
 					strtol(v, NULL, 0);
 			else {
@@ -1698,7 +1710,7 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 					flags != AUDIT_FILTER_USER)
 				return -EAU_MSGTYPEEXCLUDEUSER;
 
-			if (isdigit((char)*(v)))
+			if (isdigit((unsigned char)*(v)))
 				rule->values[rule->field_count] =
 					strtol(v, NULL, 0);
 			else
@@ -1756,7 +1768,7 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 			*rulep = realloc(rule, sizeof(*rule) + rule->buflen);
 			if (*rulep == NULL) {
 				free(rule);
-				audit_msg(LOG_ERR, "Cannot realloc memory!\n");
+				audit_msg(LOG_ERR, "Cannot realloc memory!");
 				return -3;
 			} else {
 				rule = *rulep;
@@ -1769,7 +1781,7 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 				return -EAU_ARCHMISPLACED;
 			if (!(op == AUDIT_NOT_EQUAL || op == AUDIT_EQUAL))
 				return -EAU_OPEQNOTEQ;
-			if (isdigit((char)*(v))) {
+			if (isdigit((unsigned char)*(v))) {
 				int machine;
 
 				errno = 0;
@@ -1812,7 +1824,7 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 					return -EAU_STRTOOLONG;
 
 				for (i = 0; i < len; i++) {
-					switch (tolower(v[i])) {
+					switch (tolower((unsigned char)v[i])) {
 						case 'r':
 							val |= AUDIT_PERM_READ;
 				   rc=audit_add_perm_syscalls(AUDIT_PERM_READ,rule);
@@ -1852,7 +1864,7 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 				return -EAU_FIELDUNAVAIL;
 			if (!(op == AUDIT_NOT_EQUAL || op == AUDIT_EQUAL))
 				return -EAU_OPEQNOTEQ;
-			if (isdigit((char)*(v)))
+			if (isdigit((unsigned char)*(v)))
 				rule->values[rule->field_count] =
 					strtoul(v, NULL, 0);
 			else
@@ -1865,11 +1877,11 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 			break;
 		case AUDIT_ARG0...AUDIT_ARG3:
 			vlen = strlen(v);
-			if (isdigit((char)*(v)))
+			if (isdigit((unsigned char)*(v)))
 				rule->values[rule->field_count] =
 					strtoul(v, NULL, 0);
 			else if (vlen >= 2 && *(v)=='-' &&
-						(isdigit((char)*(v+1))))
+						(isdigit((unsigned char)*(v+1))))
 				rule->values[rule->field_count] =
 					strtol(v, NULL, 0);
 			else
@@ -1885,11 +1897,11 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 				return -EAU_FIELDNOFILTER;
 			// Do positive & negative separate for 32 bit systems
 			vlen = strlen(v);
-			if (isdigit((char)*(v)))
+			if (isdigit((unsigned char)*(v)))
 				rule->values[rule->field_count] =
 					strtoul(v, NULL, 0);
 			else if (vlen >= 2 && *(v)=='-' &&
-						(isdigit((char)*(v+1))))
+						(isdigit((unsigned char)*(v+1))))
 				rule->values[rule->field_count] =
 					strtol(v, NULL, 0);
 			else if (strcmp(v, "unset") == 0)
@@ -1915,7 +1927,7 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 			if (field == AUDIT_PPID && !(flags==AUDIT_FILTER_EXIT))
 				return -EAU_EXITONLY;
 
-			if (!isdigit((char)*(v)))
+			if (!isdigit((unsigned char)*(v)))
 				return -EAU_FIELDVALNUM;
 
 			if (field == AUDIT_INODE)

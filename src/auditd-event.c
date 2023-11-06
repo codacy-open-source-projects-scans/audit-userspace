@@ -92,6 +92,9 @@ static auparse_state_t *au = NULL;
 #define FORMAT_BUF_LEN (MAX_AUDIT_MESSAGE_LENGTH + _POSIX_HOST_NAME_MAX)
 #define MIN_SPACE_LEFT 24
 
+static inline int from_network(const struct auditd_event *e)
+{ if (e && e->ack_func) return 1; return 0; }
+
 int dispatch_network_events(void)
 {
 	return config->distribute_network_events;
@@ -225,7 +228,7 @@ static void *flush_thread_main(void *arg)
 }
 
 /* We setup the flush thread no matter what. This is incase a reconfig
- * changes from non incremental to incremental or vise versa. */
+ * changes from non incremental to incremental or vice versa. */
 static void init_flush_thread(void)
 {
 	pthread_mutex_init(&flush_lock, NULL);
@@ -533,7 +536,7 @@ void enqueue_event(struct auditd_event *e)
 
 /* This function allocates memory and fills the event fields with
    passed arguments. Caller must free memory. */
-struct auditd_event *create_event(char *msg, ack_func_type ack_func,
+struct auditd_event *create_event(const char *msg, ack_func_type ack_func,
 	 void *ack_data, uint32_t sequence_id)
 {
 	struct auditd_event *e;

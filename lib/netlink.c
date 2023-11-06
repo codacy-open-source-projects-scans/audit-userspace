@@ -46,11 +46,9 @@ static int check_ack(int fd);
  */
 int audit_open(void)
 {
-	int saved_errno;
-	int fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_AUDIT);
+	int fd = socket(PF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_AUDIT);
 
 	if (fd < 0) {
-		saved_errno = errno;
 		if (errno == EINVAL || errno == EPROTONOSUPPORT ||
 				errno == EAFNOSUPPORT)
 			audit_msg(LOG_ERR,
@@ -59,17 +57,6 @@ int audit_open(void)
 			audit_msg(LOG_ERR,
 				"Error opening audit netlink socket (%s)", 
 				strerror(errno));
-		errno = saved_errno;
-		return fd;
-	}
-	if (fcntl(fd, F_SETFD, FD_CLOEXEC) == -1) {
-		saved_errno = errno;
-		audit_msg(LOG_ERR, 
-			"Error setting audit netlink socket CLOEXEC flag (%s)", 
-			strerror(errno));
-		close(fd);
-		errno = saved_errno;
-		return -1;
 	}
 	return fd;
 }
@@ -83,7 +70,7 @@ void audit_close(int fd)
 
 
 /*
- * This function returns -1 on error, 0 if error response received,
+ * This function returns -errno on error, 0 if error response received,
  * and > 0 if packet OK.
  */
 int audit_get_reply(int fd, struct audit_reply *rep, reply_t block, int peek)
@@ -96,22 +83,19 @@ int audit_get_reply(int fd, struct audit_reply *rep, reply_t block, int peek)
 		return -EBADF;
 
 	if (block == GET_REPLY_NONBLOCKING)
-		block = MSG_DONTWAIT;
+		peek |= MSG_DONTWAIT;
 
 retry:
-	len = recvfrom(fd, &rep->msg, sizeof(rep->msg), block|peek,
+	len = recvfrom(fd, &rep->msg, sizeof(rep->msg), peek,
 		(struct sockaddr*)&nladdr, &nladdrlen);
 
 	if (len < 0) {
 		if (errno == EINTR)
 			goto retry;
-		if (errno != EAGAIN) {
-			int saved_errno = errno;
+		if (errno != EAGAIN)
 			audit_msg(LOG_ERR, 
 				"Error receiving audit netlink packet (%s)", 
 				strerror(errno));
-			errno = saved_errno;
-		}
 		return -errno;
 	}
 	if (nladdrlen != sizeof(nladdr)) {
