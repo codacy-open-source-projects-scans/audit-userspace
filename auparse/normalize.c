@@ -524,6 +524,13 @@ static int set_program_obj(auparse_state_t *au)
 			D.thing.primary = set_field(D.thing.primary,
 					auparse_get_field_num(au));
 		}
+	} else if (type == AUDIT_MAC_POLICY_LOAD) {
+		if (auparse_find_field(au, "lsm")) {
+			D.thing.primary = set_record(0,
+					auparse_get_record_num(au));
+			D.thing.primary = set_field(D.thing.primary,
+					auparse_get_field_num(au));
+		}
 	} else if (auparse_find_field(au, "exe")) {
 		const char *exe = auparse_interpret_field(au);
 		if ((strncmp(exe, "/usr/bin/python", 15) == 0) ||
@@ -612,6 +619,9 @@ static int normalize_syscall(auparse_state_t *au, const char *syscall)
 	if (objtype == NORM_UNKNOWN)
 		normalize_syscall_map_s2i(syscall, &objtype);
 
+// FIXME: Need to address: landlock_*, lsm_*, map_shadow_stack, pkey_*,
+// kexec_file_load, They likely need new NORM_* types. Also, these suggest
+// that NORM_WHAT_ may need some new types.
 	switch (objtype)
 	{
 		case NORM_FILE:
@@ -771,7 +781,7 @@ static int normalize_syscall(auparse_state_t *au, const char *syscall)
 		case NORM_MAC_LOAD:
 			act = normalize_record_map_i2s(ttype);
 			// FIXME: What is the object?
-			D.thing.what = NORM_WHAT_MAC_CONFIG;
+			D.thing.what = NORM_WHAT_SECURITY_POLICY;
 			break;
 		case NORM_MAC_CONFIG:
 			act = normalize_record_map_i2s(ttype);
@@ -782,7 +792,7 @@ static int normalize_syscall(auparse_state_t *au, const char *syscall)
 				D.thing.primary = set_field(D.thing.primary,
 					auparse_get_field_num(au));
 			}
-			D.thing.what = NORM_WHAT_MAC_CONFIG;
+			D.thing.what = NORM_WHAT_SECURITY_POLICY;
 			break;
 		case NORM_MAC_ENFORCE:
 			act = normalize_record_map_i2s(ttype);
@@ -793,7 +803,7 @@ static int normalize_syscall(auparse_state_t *au, const char *syscall)
 				D.thing.primary = set_field(D.thing.primary,
 					auparse_get_field_num(au));
 			}
-			D.thing.what = NORM_WHAT_MAC_CONFIG;
+			D.thing.what = NORM_WHAT_SECURITY_POLICY;
 			break;
 		case NORM_MAC_ERR:
 			// FIXME: What could the object be?
@@ -1087,6 +1097,10 @@ const char *find_config_change_object(auparse_state_t *au)
 	f = auparse_find_field(au, "actions"); // seccomp-logging
 	if (f)
 		return f;
+	auparse_first_record(au);
+	f = auparse_find_field(au, "list");	// If nothing else, the list
+	if (f)
+		return f;
 
 	return NULL;
 }
@@ -1098,7 +1112,10 @@ static int normalize_compound(auparse_state_t *au)
 
 	otype = type = auparse_get_type(au);
 
-	// All compound events have a syscall record, find it
+	// All compound events have a syscall record, find it. After this
+	// loop, type should be syscall, and otype is the original type.
+	// Traditionally, the first record is the purpose of the event and
+	// the syscall is added on next to support/enhance information content.
 	if (type != AUDIT_SYSCALL) {
 		do {
 			// If we go off the end without finding a syscall
@@ -1232,8 +1249,11 @@ static int normalize_compound(auparse_state_t *au)
 				o = find_simple_object(au, AUDIT_CONFIG_CHANGE);
 				D.thing.primary = o;
 			}
-		} else
+		} else {
 			normalize_syscall(au, syscall);
+			if (otype == AUDIT_MAC_POLICY_LOAD)
+				set_program_obj(au);
+		}
 	}
 
 	free((void *)syscall);
@@ -1343,17 +1363,17 @@ static value_t find_simple_object(auparse_state_t *au, int type)
 			break;
 		case AUDIT_MAC_CONFIG_CHANGE:
 			f = auparse_find_field(au, "bool");
-			D.thing.what = NORM_WHAT_MAC_CONFIG;
+			D.thing.what = NORM_WHAT_SECURITY_POLICY;
 			break;
 		case AUDIT_MAC_STATUS:
 			f = auparse_find_field(au, "enforcing");
-			D.thing.what = NORM_WHAT_MAC_CONFIG;
+			D.thing.what = NORM_WHAT_SECURITY_POLICY;
 			break;
 		// These deal with policy, not sure about object yet
 		case AUDIT_MAC_POLICY_LOAD:
 		case AUDIT_LABEL_OVERRIDE:
 		case AUDIT_DEV_ALLOC ... AUDIT_USER_MAC_CONFIG_CHANGE:
-			D.thing.what = NORM_WHAT_MAC_CONFIG;
+			D.thing.what = NORM_WHAT_SECURITY_POLICY;
 			break;
 		case AUDIT_USER:
 			f = auparse_find_field(au, "addr");
@@ -1845,7 +1865,7 @@ map:
 		}
 
 		// Object type
-		D.thing.what = NORM_WHAT_MAC_CONFIG;
+		D.thing.what = NORM_WHAT_SECURITY_POLICY;
 
 		// Results
 		set_results(au, 0);
