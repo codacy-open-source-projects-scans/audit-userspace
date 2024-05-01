@@ -86,7 +86,14 @@ AC_LINK_IFELSE(
  [AC_DEFINE(HAVE_STRNDUPA, 1, [Let us know if we have it or not])],
  []
 )
-
+AC_CHECK_HEADERS([stdatomic.h], [
+    AC_DEFINE([HAVE_ATOMIC], 1, [Define to 1 if you have the <stdatomic.h> header file.])
+    AC_DEFINE([ATOMIC_INT], atomic_int, [Define atomic_int if you have the <stdatomic.h> header file.])
+    AC_DEFINE([ATOMIC_UNSIGNED], atomic_uint, [Define atomic_uint if you have the <stdatomic.h> header file.])
+  ], [
+    AC_DEFINE([ATOMIC_INT], int, [Define to the type of an int if <stdatomic.h> is not available.])
+    AC_DEFINE([ATOMIC_UNSIGNED], unsigned, [Define to the type of an unsigned if <stdatomic.h> is not available.])
+])
 AC_MSG_CHECKING(__attr_access support)
 AC_COMPILE_IFELSE(
   [AC_LANG_SOURCE(
@@ -119,21 +126,6 @@ OLDLIBS="$LIBS"
 AC_SEARCH_LIBS(pthread_yield, pthread, 
 	[AC_DEFINE(HAVE_PTHREAD_YIELD, 1, [Define to 1 if we have pthread_yield])], [])
 LIBS="$OLDLIBS"
-
-ALLWARNS=""
-ALLDEBUG="-g"
-OPT="-O"
-if test x"$GCC" = x"yes"; then
-  OPT="-O2 -pipe"
-  case "$target" in
-    *linux*)
-             ALLWARNS="-W -Wall -Wundef -Wpointer-arith -Wcast-align \
--Wwrite-strings -Waggregate-return -Wstrict-prototypes \
--Wmissing-prototypes -Wmissing-declarations -Wredundant-decls \
--Wnested-externs -Winline -Wfloat-equal -Wchar-subscripts"
-             ;;
-    esac
-fi
 
 withval=""
 AC_MSG_CHECKING(whether to create python3 bindings)
@@ -291,17 +283,6 @@ else
 fi
 ],
 [ DEBUG="-DNDEBUG"; AM_CONDITIONAL(DEBUG, false) ])
-
-withval=""
-AC_ARG_WITH(warn,
-[  --with-warn             turn on warnings [[default=yes]]],
-[
-if test "x${withval}" = xyes; then
-        WARNS="$ALLWARNS"
-else
-        WARNS=""
-fi
-],WARNS="$ALLWARNS")
 
 WFLAGS=""
 AC_MSG_CHECKING(for -Wformat-truncation)
