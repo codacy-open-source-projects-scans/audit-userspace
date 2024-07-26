@@ -495,7 +495,7 @@ auparse_state_t *auparse_init(ausource_t source, const void *b)
 			if (access_ok(b))
 				goto bad_exit;
 			tmp = malloc(2*sizeof(char *));
-			if (tmp == NULL) 
+			if (tmp == NULL)
 				goto bad_exit;
 			tmp[0] = strdup(b);
 			tmp[1] = NULL;
@@ -789,14 +789,19 @@ int auparse_reset(auparse_state_t *au)
 char *auparse_metrics(const auparse_state_t *au)
 {
 	char *metrics;
+	unsigned int uid, gid;
+
+	aulookup_metrics(&uid, &gid);
 
 	if (asprintf(&metrics,
 		     "max lol available: %lu\n"
 		     "max lol used: %d\n"
-		     "pending lol: %d",
+		     "pending lol: %d\n"
+		     "uid cache size: %u\n"
+		     "gid cache size: %u",
 		     au->au_lo->limit,
 		     au->au_lo->maxi,
-		     au->au_ready) < 0)
+		     au->au_ready, uid, gid) < 0)
 		metrics = NULL;
 	return metrics;
 }
@@ -1043,7 +1048,7 @@ static void auparse_destroy_common(auparse_state_t *au)
 
 void auparse_destroy(auparse_state_t *au)
 {
-	lookup_destroy_uid_list();
+	aulookup_destroy_uid_list();
 	aulookup_destroy_gid_list();
 
 	auparse_destroy_common(au);
@@ -1203,13 +1208,14 @@ static int str2event(char *s, au_event_t *e)
 }
 
 #ifndef HAVE_STRNDUPA
-static inline char *strndupa(const char *old, size_t n)
-{
-	size_t len = strnlen(old, n);
-	char *tmp = alloca(len + 1);
-	tmp[len] = 0;
-	return memcpy(tmp, old, len);
-}
+#define strndupa(s, n)								\
+	({												\
+		const char *__old = (s);					\
+		size_t __len = strnlen (__old, (n));		\
+		char *__new = (char *) alloca(__len + 1);	\
+		__new[__len] = '\0';						\
+		(char *) memcpy (__new, __old, __len);		\
+	})
 #endif
 
 /* Returns 0 on success and 1 on error */
