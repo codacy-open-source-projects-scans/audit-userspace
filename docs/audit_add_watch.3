@@ -1,0 +1,25 @@
+.TH "AUDIT_ADD_WATCH" "3" "Feb 2007" "Red Hat" "Linux Audit API"
+.SH NAME
+audit_add_watch \- create a rule layout for a watch
+.SH "SYNOPSIS"
+.nf
+.B #include <libaudit.h>
+.PP
+.BI "int audit_add_watch(struct audit_rule_data **" rulep ", const char *" path );"
+.fi
+
+.SH "DESCRIPTION"
+
+audit_add_watch will create a watch rule in the pointer to a pointer \fIrulep\fP. All that you need to pass it is the full \fIpath\fP to a file and it will initialize the audit_rule_data structure for a watch.
+
+.SH "RETURN VALUE"
+
+Returns \-1 if an error occurs; otherwise, 0 for success.
+
+.SH "SEE ALSO"
+
+.BR audit_add_rule_data (3),
+.BR audit_delete_rule_data (3).
+
+.SH AUTHOR
+Steve Grubb
