@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <libgen.h>
+#include <limits.h>
 #include "audispd-pconfig.h"
 #include "private.h"
 
@@ -92,13 +93,6 @@ static const struct nv_list active[] =
   { NULL,  0 }
 };
 
-static const struct nv_list directions[] =
-{
-//  {"in",   D_IN },	FIXME: not supported yet
-  {"out",  D_OUT },
-  { NULL,  0 }
-};
-
 static const struct nv_list service_type[] =
 {
   {"builtin",  S_BUILTIN },
@@ -119,7 +113,6 @@ static const struct nv_list formats[] =
 void clear_pconfig(plugin_conf_t *config)
 {
 	config->active = A_NO;
-	config->direction = D_UNSET;
 	config->path = NULL;
 	config->type = S_ALWAYS;
 	config->args = NULL;
@@ -134,7 +127,7 @@ void clear_pconfig(plugin_conf_t *config)
 	config->restart_cnt = 0;
 }
 
-int load_pconfig(plugin_conf_t *config, char *file)
+int load_pconfig(plugin_conf_t *config, int dirfd, char *file)
 {
 	int fd, rc, mode, lineno = 1;
 	struct stat st;
@@ -143,9 +136,10 @@ int load_pconfig(plugin_conf_t *config, char *file)
 
 	clear_pconfig(config);
 
-	/* open the file */
-	mode = O_RDONLY;
-	rc = open(file, mode);
+	/* O_PATH avoids blocking, as no read/seek is done.
+	 * We do not pass O_NOFOLLOW, which allows for symlinked configs.
+	 */
+	rc = openat(dirfd, file, O_PATH);
 	if (rc < 0) {
 		if (errno != ENOENT) {
 			audit_msg(LOG_ERR, "Error opening %s (%s)", file,
@@ -159,7 +153,7 @@ int load_pconfig(plugin_conf_t *config, char *file)
 	fd = rc;
 
 	/* check the file's permissions: owned by root, not world writable,
-	 * not symlink.
+	 * pointing to regular file.
 	 */
 	if (fstat(fd, &st) < 0) {
 		audit_msg(LOG_ERR, "Error fstat'ing config file (%s)",
@@ -179,12 +173,29 @@ int load_pconfig(plugin_conf_t *config, char *file)
 		close(fd);
 		return 1;
 	}
+	// this checks if the actual file is a regular file. The initial open might have followed a symlink, which is acceptable.
 	if (!S_ISREG(st.st_mode)) {
 		audit_msg(LOG_ERR, "Error - %s is not a regular file",
 			file);
 		close(fd);
 		return 1;
 	}
+
+	// reopen with read perms
+	char fname[PATH_MAX];
+	snprintf(fname, PATH_MAX, "/proc/self/fd/%i", fd);
+	mode = O_RDONLY;
+	rc = open(fname, mode);
+
+	if (rc < 0) {
+		audit_msg(LOG_ERR, "Error - Failed to reopen %s for reading",
+			file);
+		close(fd);
+		return 1;
+	}
+
+	close(fd);
+	fd = rc;
 
 	/* it's ok, read line by line */
 	f = fdopen(fd, "rm");
@@ -367,19 +378,11 @@ static int active_parser(struct nv_pair *nv, int line,
 	return 1;
 }
 
+// This is deprecated. All plugins are outbound.
 static int direction_parser(struct nv_pair *nv, int line,
 		plugin_conf_t *config)
 {
-	int i;
-
-	for (i=0; directions[i].name != NULL; i++) {
-		if (strcasecmp(nv->values[0], directions[i].name) == 0) {
-			config->direction = directions[i].option;
-			return 0;
-		}
-	}
-	audit_msg(LOG_ERR, "Option %s not found - line %d", nv->values[0], line);
-	return 1;
+	return 0;
 }
 
 static const char *BUILTIN_PATH="/sbin/audisp-af_unix";
@@ -506,9 +509,9 @@ static int sanity_check(plugin_conf_t *config, const char *file)
 				 config->path);
 			return 1;
 		}
-		if ((buf.st_mode & (S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP)) !=
-				   (S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP)) {
-			audit_msg(LOG_ERR, "%s permissions should be 0750",
+		if ((buf.st_mode & (S_IRUSR|S_IXUSR|S_IRGRP|S_IXGRP)) !=
+				   (S_IRUSR|S_IXUSR|S_IRGRP|S_IXGRP)) {
+			audit_msg(LOG_ERR, "%s permissions should be at least 0550",
 				 config->path);
 			return 1;
 		}

@@ -53,6 +53,8 @@ void usage(void)
 static void report_session(lnode* cur)
 {
 	int notime = 0;
+	const char *term;
+	const char *term_to_print;
 
 	// Don't list failed logins
 	if (cur == NULL)
@@ -71,10 +73,15 @@ static void report_session(lnode* cur)
 	} else
 		printf("%-8.u ", cur->auid);
 
-	if (strncmp("/dev/", cur->term, 5) == 0)
-		printf("%-12.12s ", cur->term+5);
-	else
-		printf("%-12.12s ", cur->term);
+	term = cur->term ? cur->term : "?";
+	term_to_print = term;
+	if (strncmp(term, "/dev/", 5) == 0) {
+		if (strlen(term) > 5)
+			term_to_print = term + 5;
+		else
+			term_to_print = "";
+	}
+	printf("%-12.12s ", term_to_print);
 	printf("%-16.16s ", cur->host ? cur->host : "?");
 	printf("%-16.16s ", ctime(&cur->start));
 	switch(cur->status)
@@ -332,12 +339,6 @@ static void update_session_login(auparse_state_t *au)
 		list_update_start(&l, host, term, result,
 				auparse_get_serial(au));
 
-		// If the results were failed, we can close it out
-		/* FIXME: result cannot be true. This is dead code.
-		if (result) {
-			report_session(cur);
-			list_delete_cur(&l);
-		} */
 	} else if (bad == 1 && result == 1) {
 		// If it were a bad login and we are wanting bad logins
 		// create the record and report it.

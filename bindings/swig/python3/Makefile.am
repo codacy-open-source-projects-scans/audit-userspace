@@ -28,10 +28,8 @@ SWIG_FLAGS = -python
 SWIG_INCLUDES = -I. -I$(top_builddir) -I${top_srcdir}/lib $(PYTHON3_INCLUDES)
 pyexec_PYTHON = audit.py
 pyexec_LTLIBRARIES = _audit.la
-pyexec_SOLIBRARIES = _audit.so
 _audit_la_CFLAGS = -shared
 _audit_la_LDFLAGS = -module -avoid-version -Wl,-z,relro
-_audit_la_HEADERS: $(top_builddir)/config.h 
 _audit_la_DEPENDENCIES =${top_srcdir}/lib/audit_logging.h ${top_builddir}/lib/libaudit.la
 _audit_la_LIBADD = ${top_builddir}/lib/libaudit.la
 nodist__audit_la_SOURCES  = audit_wrap.c

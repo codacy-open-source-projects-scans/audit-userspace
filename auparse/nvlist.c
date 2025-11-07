@@ -58,7 +58,8 @@ nvnode *nvlist_next(nvlist *l)
 // 0 on success and 1 on error
 int nvlist_append(nvlist *l, const nvnode *node)
 {
-	if (node->name == NULL)
+	if ((node->name == NULL) ||
+		(node->val == NULL))
 		return 1;
 
 	if (l->array == NULL)
@@ -137,7 +138,7 @@ int nvlist_get_cur_type(rnode *r)
 	return auparse_interp_adjust_type(r->type, node->name, node->val);
 }
 
-const char *nvlist_interp_cur_val(rnode *r, auparse_esc_t escape_mode)
+const char *nvlist_interp_cur_val(auparse_state_t *au, rnode *r)
 {
 	nvlist *l = &r->nv;
 	if (l->cnt == 0)
@@ -145,7 +146,7 @@ const char *nvlist_interp_cur_val(rnode *r, auparse_esc_t escape_mode)
 	nvnode *node = &l->array[l->cur];
 	if (node->interp_val)
 		return node->interp_val;
-	return do_interpret(r, escape_mode);
+	return do_interpret(au, r);
 }
 
 // This function determines if a chunk of memory is part of the parsed up
@@ -164,7 +165,7 @@ void nvlist_clear(nvlist *l, int free_interp)
 	unsigned int i = 0;
 	register nvnode *current;
 
-	while (i < l->cnt) {
+	while (i < l->cnt && l->cnt != NEVER_LOADED) {
 		current = &l->array[i];
 		if (free_interp) {
 			free(current->interp_val);

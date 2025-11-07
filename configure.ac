@@ -1,8 +1,7 @@
-
 dnl
 define([AC_INIT_NOTICE],
 [### Generated automatically using autoconf version] AC_ACVERSION [
-### Copyright 2005-24 Steve Grubb <sgrubb@redhat.com>
+### Copyright 2005-25 Steve Grubb <sgrubb@redhat.com>
 ###
 ### Permission is hereby granted, free of charge, to any person obtaining a
 ### copy of this software and associated documentation files (the "Software"),
@@ -30,7 +29,7 @@ define([AC_INIT_NOTICE],
 ])
 
 AC_REVISION($Revision: 1.3 $)dnl
-AC_INIT([audit], [4.0.3])
+AC_INIT([audit], [4.1.3])
 AC_PREREQ([2.50])dnl
 AC_CONFIG_HEADERS([config.h])
 
@@ -38,7 +37,7 @@ echo Configuring auditd $VERSION
 
 AC_CONFIG_MACRO_DIR([m4])
 AC_CANONICAL_TARGET
-AM_INIT_AUTOMAKE([subdir-objects])
+AM_INIT_AUTOMAKE([subdir-objects foreign])
 LT_INIT
 AC_SUBST(LIBTOOL_DEPS)
 OLDLIBS="$LIBS"
@@ -62,6 +61,8 @@ AC_CHECK_SIZEOF([long])
 AC_CHECK_SIZEOF([time_t])
 dnl; next is needed for old compilers and plugins/ids/Makefile.am
 AM_PROG_CC_C_O
+AC_DEFINE_UNQUOTED([AUDIT_RUN_DIR], ["$runstatedir/audit"],
+       [Directory for audit runtime state files])
 AC_CHECK_DECLS([AUDIT_FEATURE_VERSION], [], [], [[#include <linux/audit.h>]])
 AC_CHECK_MEMBERS([struct audit_status.feature_bitmap], [], [], [[#include <linux/audit.h>]])
 AC_CHECK_DECLS([AUDIT_VERSION_BACKLOG_WAIT_TIME], [], [], [[#include <linux/audit.h>]])
@@ -76,6 +77,10 @@ dnl; check if rawmemchr is available
 AC_CHECK_FUNCS([rawmemchr])
 dnl; check if faccessat is available
 AC_CHECK_FUNCS([faccessat])
+dnl; check if mallinfo2 is available
+AC_CHECK_FUNCS([mallinfo2])
+dnl; check if close_range is available
+AC_CHECK_FUNCS([close_range])
 dnl; check if strndupa is available
 AC_LINK_IFELSE(
   [AC_LANG_SOURCE(
@@ -99,7 +104,7 @@ AC_COMPILE_IFELSE(
   [AC_LANG_SOURCE(
     [[
       #include <stdio.h>
-      int audit_fgets(char *buf, size_t blen, int fd)
+      int auplugin_fgets(char *buf, size_t blen, int fd)
         __attr_access ((__write_only__, 1, 2));
       int main(void) { return 0; }]])],
   [ACCESS="yes"],
@@ -155,11 +160,13 @@ else
 	AC_SUBST(PYTHON3_CFLAGS)
 	AC_SUBST(PYTHON3_LIBS)
 	AC_SUBST(PYTHON3_INCLUDES)
+	AC_SUBST(use_python3)
 	fi
 fi
 AM_CONDITIONAL(USE_PYTHON3, test ${use_python3} = "yes")
+AC_SUBST(use_python3)
 
-if test "x$use_python" = "xyes" || test "x$use_python3" = "xyes" ; then
+if test "x$use_python3" = "xyes" ; then
 	AC_CHECK_PROG([SWIG],[swig],[swig], [no])
 	AS_IF([test x"$SWIG" == x"no"], [AC_MSG_ERROR([Please install swig before configuring (required by python/python3).])])
 fi
@@ -228,6 +235,16 @@ AC_MSG_CHECKING(whether to include audisp ZOS remote plugin)
 AM_CONDITIONAL(ENABLE_ZOS_REMOTE, test "x$enable_zos_remote" != "xno")
 AC_MSG_RESULT($enable_zos_remote)
 
+# legacy actions
+AC_MSG_CHECKING(whether to install legacy actions)
+AC_ARG_ENABLE(legacy-actions,
+	      [AS_HELP_STRING([--disable-legacy-actions],
+			      [Disable legacy actions])],
+	      install_legacy_actions=$enableval,
+	      install_legacy_actions=yes)
+AM_CONDITIONAL(INSTALL_LEGACY_ACTIONS, test "x$install_legacy_actions" != "xno")
+AC_MSG_RESULT($install_legacy_actions)
+
 #gssapi
 AC_ARG_ENABLE(gssapi_krb5,
 	[AS_HELP_STRING([--enable-gssapi-krb5],[Enable GSSAPI Kerberos 5 support @<:@default=no@:>@])],
@@ -269,21 +286,6 @@ AC_CHECK_HEADER(linux/fanotify.h, [ AC_DEFINE(USE_FANOTIFY, [],
 	[Defined when fanotify headers are found]) ])
 
 withval=""
-ALLDEBUG="-g"
-AC_ARG_WITH(debug,
-[  --with-debug            turn on debugging [[default=no]]],
-[
-if test "x${withval}" = xyes; then
-        DEBUG="$ALLDEBUG"
-        OPT="-O"
-        AM_CONDITIONAL(DEBUG, true)
-else
-        DEBUG="-DNDEBUG"
-        AM_CONDITIONAL(DEBUG, false)
-fi
-],
-[ DEBUG="-DNDEBUG"; AM_CONDITIONAL(DEBUG, false) ])
-
 WFLAGS=""
 AC_MSG_CHECKING(for -Wformat-truncation)
 TMPCFLAGS="${CFLAGS}"
@@ -298,6 +300,20 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])],[WFLAGS="${WFLAGS} -Wno-unused-but-
 	[AC_MSG_RESULT(no)])
 CFLAGS="${TMPCFLAGS}"
 AC_SUBST(WFLAGS)
+
+AC_MSG_CHECKING([for -fsanitize=address])
+TMPCFLAGS="${CFLAGS}"
+TMPLDFLAGS="${LDFLAGS}"
+CFLAGS="${CFLAGS} -fsanitize=address"
+LDFLAGS="${LDFLAGS} -fsanitize=address"
+AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])],
+[ASAN_FLAGS="-fsanitize=address"; have_asan=yes; AC_MSG_RESULT(yes)],
+[have_asan=no; AC_MSG_RESULT(no)])
+CFLAGS="${TMPCFLAGS}"
+LDFLAGS="${TMPLDFLAGS}"
+AC_SUBST(ASAN_FLAGS)
+AM_CONDITIONAL(HAVE_ASAN, test x$have_asan = xyes)
+AM_CONDITIONAL(BUILD_STATIC, test "x$enable_static" != "xno")
 
 withval=""
 AC_MSG_CHECKING(whether to include arm eabi processor support)
@@ -322,6 +338,18 @@ if test x$use_aarch64 != xno ; then
 fi
 AM_CONDITIONAL(USE_AARCH64, test x$use_aarch64 = xyes)
 AC_MSG_RESULT($use_aarch64)
+
+withval=""
+AC_MSG_CHECKING(whether to include riscv processor support)
+AC_ARG_WITH(riscv,
+AS_HELP_STRING([--with-riscv],[enable riscv processor support]),
+use_riscv=$withval,
+use_riscv=no)
+if test x$use_riscv != xno ; then
+      AC_DEFINE(WITH_RISCV,1,[Define if you want to enable RISC-V processor support.])
+fi
+AM_CONDITIONAL(USE_RISCV, test x$use_riscv = xyes)
+AC_MSG_RESULT($use_riscv)
 
 withval=""
 AC_MSG_CHECKING(whether to use apparmor)
@@ -386,14 +414,26 @@ use_io_uring=no)
 if test x$use_io_uring != xno ; then
      AC_DEFINE(WITH_IO_URING,1,[Define if you want to enable io_uring support.])
 fi
-# AM_CONDITIONAL(USE_IO_URING, test x$use_io_uring = xyes)
 AC_MSG_RESULT($use_io_uring)
 
-# linux/ipx.h - deprecated in 2018
-AC_CHECK_HEADER(linux/ipx.h, ipx_headers=yes, ipx_headers=no)
-if test $ipx_headers = yes ; then
-	AC_DEFINE(HAVE_IPX_HEADERS,1,[IPX packet interpretation])
+# Determine firewall control utility
+AC_ARG_WITH([nftables],
+AS_HELP_STRING([--with-nftables],
+               [use nftables (default is nftables)]),
+with_nftables=$withval,
+with_nftables=yes)
+
+AC_MSG_CHECKING([which firewall command to use])
+if test "x$with_nftables" = xyes ; then
+	AC_DEFINE([USE_NFTABLES], [1],
+		[Define if nftables should be used to manage firewall rules])
+	fwchoice="nftables"
+else
+	AC_DEFINE([USE_IPTABLES], [1],
+		[Define if iptables should be used to manage firewall rules])
+	fwchoice="iptables"
 fi
+AC_MSG_RESULT([$fwchoice])
 
 # See if we want to support lower capabilities for plugins
 LIBCAP_NG_PATH
@@ -402,7 +442,25 @@ AC_SUBST(DEBUG)
 AC_SUBST(LIBWRAP_LIBS)
 #AC_SUBST(libev_LIBS)
 
-AC_CONFIG_FILES(Makefile common/Makefile lib/Makefile lib/audit.pc lib/test/Makefile auparse/Makefile auparse/test/Makefile auparse/auparse.pc src/Makefile src/libev/Makefile src/test/Makefile docs/Makefile rules/Makefile init.d/Makefile audisp/Makefile audisp/plugins/Makefile audisp/plugins/af_unix/Makefile audisp/plugins/remote/Makefile audisp/plugins/zos-remote/Makefile audisp/plugins/syslog/Makefile audisp/plugins/filter/Makefile audisp/plugins/ids/Makefile audisp/plugins/ids/rules/Makefile audisp/plugins/statsd/Makefile bindings/Makefile bindings/python/Makefile bindings/python/python3/Makefile bindings/golang/Makefile bindings/swig/Makefile bindings/swig/src/Makefile bindings/swig/python3/Makefile tools/Makefile tools/aulast/Makefile tools/aulastlog/Makefile tools/ausyscall/Makefile m4/Makefile)
+AC_CONFIG_FILES([Makefile common/Makefile lib/Makefile lib/audit.pc
+       lib/test/Makefile auplugin/Makefile
+       auplugin/test/Makefile auparse/Makefile
+       auparse/test/Makefile auparse/test/run_auparse_tests.sh
+       auparse/test/run_auparselol_test.sh
+       auparse/auparse.pc src/Makefile src/libev/Makefile src/test/Makefile
+       docs/Makefile rules/Makefile init.d/Makefile
+       audisp/Makefile audisp/test/Makefile
+       audisp/plugins/Makefile audisp/plugins/af_unix/Makefile
+       audisp/plugins/remote/Makefile audisp/plugins/zos-remote/Makefile
+       audisp/plugins/syslog/Makefile audisp/plugins/filter/Makefile
+       audisp/plugins/ids/Makefile audisp/plugins/ids/rules/Makefile
+       audisp/plugins/statsd/Makefile bindings/Makefile bindings/python/Makefile
+       bindings/python/python3/Makefile bindings/golang/Makefile
+       bindings/swig/Makefile bindings/swig/src/Makefile
+       bindings/swig/python3/Makefile tools/Makefile tools/aulast/Makefile
+       tools/aulast/test/Makefile
+       tools/aulastlog/Makefile tools/ausyscall/Makefile m4/Makefile],
+       [chmod +x auparse/test/run_auparse_tests.sh auparse/test/run_auparselol_test.sh])
 AC_OUTPUT
 
 echo .

@@ -24,7 +24,8 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdarg.h>
-#include "libaudit.h"
+#include <syslog.h>
+#include "common.h"
 #include "private.h"
 
 /* The message mode refers to where informational messages go
@@ -32,7 +33,7 @@
 static message_t message_mode = MSG_QUIET;
 static debug_message_t debug_message = DBG_NO;
 
-void set_aumessage_mode(message_t mode, debug_message_t debug)
+void _set_aumessage_mode(message_t mode, debug_message_t debug)
 {
         message_mode = mode;
 	debug_message = debug;

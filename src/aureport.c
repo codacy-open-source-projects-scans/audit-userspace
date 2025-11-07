@@ -43,10 +43,12 @@
 #include "ausearch-lookup.h"
 #include "auparse-idata.h"
 #include "ausearch-parse.h"
+#include "common.h"
 
 
 extern event very_first_event;
 event very_last_event;
+static auparse_state_t *au = NULL;
 static FILE *log_fd = NULL;
 static lol lo;
 static int found = 0;
@@ -95,9 +97,15 @@ int main(int argc, char *argv[])
 	limit.rlim_max = RLIM_INFINITY;
 	setrlimit(RLIMIT_FSIZE, &limit);
 	setrlimit(RLIMIT_CPU, &limit);
-	set_aumessage_mode(MSG_STDERR, DBG_NO);
+	_set_aumessage_mode(MSG_STDERR, DBG_NO);
+	set_allow_links(1); // auditd might have -l flag, aureport should be lenient here
 	(void) umask( umask( 077 ) | 027 );
 	very_first_event.sec = 0;
+	au = auparse_init(AUSOURCE_BUFFER, "");
+	if (au == NULL) {
+		fprintf(stderr, "cannot init parser\n");
+		return 1;
+	}
 	reset_counters();
 
 	/* Load config so we know where logs are and eoe_timeout */
@@ -163,15 +171,17 @@ int main(int argc, char *argv[])
 
 static int process_logs(void)
 {
+	struct audit_log_info *logs = NULL;
 	char *filename;
 	size_t len;
-	int num = 0;
+	size_t log_cnt = 0;
 
 	if (user_file && userfile_is_dir) {
 		char dirname[MAXPATHLEN+1];
 		clear_config (&config);
 
 		strncpy(dirname, user_file, MAXPATHLEN-32);
+		dirname[MAXPATHLEN-32] = '\0';
 		if (dirname[strlen(dirname)-1] != '/')
 			strcat(dirname, "/");
 		strcat (dirname, "audit.log");
@@ -180,7 +190,6 @@ static int process_logs(void)
 		fprintf(stderr, "NOTE - using logs in %s\n", config.log_file);
 	}
 
-	/* for each file */
 	len = strlen(config.log_file) + 16;
 	filename = malloc(len);
 	if (!filename) {
@@ -188,24 +197,32 @@ static int process_logs(void)
 		free_config(&config);
 		return 1;
 	}
-	/* Find oldest log file */
-	snprintf(filename, len, "%s", config.log_file);
-	do {
-		if (access(filename, R_OK) != 0)
-			break;
-// FIXME: do a time check and put them on linked list for later
-		num++;
-		snprintf(filename, len, "%s.%d", config.log_file, num);
-	} while (1);
-	num--;
-	/*
-	 * We note how many files we need to process
-	 */
-	files_to_process = num;
+
+	/* Count the logs */
+	if (audit_log_list(config.log_file, &logs, &log_cnt)) {
+		fprintf(stderr, "No memory\n");
+		free(filename);
+		free_config(&config);
+		return 1;
+	}
+
+	if (log_cnt == 0) {
+		snprintf(filename, len, "%s", config.log_file);
+		int ret = process_file(filename);
+		audit_log_free(logs, log_cnt);
+		free(filename);
+		free_config(&config);
+		return ret;
+	}
+
+	/* Locate the starting file that is in range */
+	files_to_process = audit_log_find_start(logs, log_cnt, start_time);
+	audit_log_free(logs, log_cnt);
 
 	/* Got it, now process logs from last to first */
-	if (num > 0)
-		snprintf(filename, len, "%s.%d", config.log_file, num);
+	if (files_to_process > 0)
+		snprintf(filename, len, "%s.%d", config.log_file,
+			 files_to_process);
 	else
 		snprintf(filename, len, "%s", config.log_file);
 	do {
@@ -216,15 +233,17 @@ static int process_logs(void)
 			return ret;
 		}
 
-		/* Get next log file */
-		files_to_process--;     /* one less file to process */
-		num--;
-		if (num > 0)
-			snprintf(filename, len, "%s.%d", config.log_file, num);
-		else if (num == 0)
-			snprintf(filename, len, "%s", config.log_file);
-		else
+		if (files_to_process == 0)
 			break;
+
+		/* Get next log file */
+		files_to_process--;
+		if (files_to_process > 0)
+			snprintf(filename, len, "%s.%d",
+				 config.log_file, files_to_process);
+		else
+			snprintf(filename, len, "%s",
+				 config.log_file);
 	} while (1);
 	free(filename);
 	free_config(&config);
@@ -235,13 +254,15 @@ static void process_event(llist *entries)
 {
 	if (scan(entries)) {
 		// If its a single event or SYSCALL load interpretations
-		if ((entries->cnt == 1) || 
-				(entries->head->type == AUDIT_SYSCALL))
-			_auparse_load_interpretations(entries->head->interp);
+		if ((entries->cnt == 1) ||
+				(entries->head->type == AUDIT_SYSCALL)) {
+			_auparse_load_interpretations(au,
+					entries->head->interp);
+		}
 		// This is the per entry action item
 		if (per_event_processing(entries))
 			found = 1;
-		_auparse_free_interpretations();
+		_auparse_free_interpretations(au);
 	}
 }
 

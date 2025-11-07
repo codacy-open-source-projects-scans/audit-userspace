@@ -1,5 +1,5 @@
-/* internal.h -- 
- * Copyright 2006-07,2013-17 Red Hat Inc., Durham, North Carolina.
+/* internal.h --
+ * Copyright 2006-07,2013-17,2025 Red Hat Inc.
  * All Rights Reserved.
  *
  * This library is free software; you can redistribute it and/or
@@ -15,7 +15,7 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- * 
+ *
  * Authors:
  *	Steve Grubb <sgrubb@redhat.com>
  */
@@ -28,6 +28,8 @@
 #include "data_buf.h"
 #include "normalize-llist.h"
 #include "dso.h"
+#include "nvlist.h"
+#include "lru.h"
 #include <stdio.h>
 
 /* This is what state the parser is in */
@@ -49,7 +51,7 @@ typedef enum { EVENT_EMPTY, EVENT_ACCUMULATING, EVENT_EMITTED } auparser_state_t
  *      event1_record4
  *      event3_record0
  *      ...
- *      
+ *
  * The auditd system does guarantee that the records that make up an event will
  * appear in order. Thus, when processing event streams, we need to maintain
  * a list of events with their own list of records hence List of List (LOL)
@@ -150,7 +152,7 @@ struct opaque
 	char *next_buf;			// The current buffer being broken down
 	unsigned int off;		// The current offset into next_buf
 	char *cur_buf;			// The current buffer being parsed
-	int line_pushed;		// True if retrieve_next_line() 
+	int line_pushed;		// True if retrieve_next_line()
 					//	returns same input
 	event_list_t *le;		// Linked list of record in same event
 	struct expr *expr;		// Search expression or NULL
@@ -168,7 +170,7 @@ struct opaque
 
 	// function to call when user_data is destroyed
 	void (*callback_user_data_destroy)(void *user_data);
-	
+
 	au_lol *au_lo;		// List of events
 	int au_ready;		// For speed, we note how many EBS_COMPLETE
 				// events we hold at any point in time. Thus
@@ -178,13 +180,20 @@ struct opaque
 	debug_message_t debug_message;	// Whether or not messages are debug or not
 	const char *tmp_translation;	// Pointer to manage mem for field translation
 	normalize_data norm_data;
+	nvlist interpretations;		// Per-parser interpretations list
+	Queue *uid_cache;               // per-parser UID cache
+	Queue *gid_cache;               // per-parser GID cache
 };
 
 AUDIT_HIDDEN_START
 
 // auditd-config.c
-int aup_load_config(auparse_state_t *au, struct daemon_conf *config, log_test_t lt);
+int aup_load_config(auparse_state_t *au, struct daemon_conf *config,
+		    log_test_t lt);
 void aup_free_config(struct daemon_conf *config);
+
+/* Resolve @name to a uid, caching the result for future lookups. */
+uid_t lookup_uid_from_name(auparse_state_t *au, const char *name);
 
 // normalize.c
 void init_normalizer(normalize_data *d);

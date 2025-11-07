@@ -100,6 +100,7 @@ static struct libaudit_conf config;
 static int audit_failure_parser(const char *val, int line);
 static int audit_name_to_uid(const char *name, uid_t *auid);
 static int audit_name_to_gid(const char *name, gid_t *gid);
+static char* filter_supported_syscalls(const char* syscalls, int machine) __attr_dealloc_free;
 
 static const struct kw_pair keywords[] =
 {
@@ -121,9 +122,10 @@ static int audit_priority(int xerrno)
 int audit_request_status(int fd)
 {
 	int rc = audit_send(fd, AUDIT_GET, NULL, 0);
-	if (rc < 0) 
+	if (rc < 0)
 		audit_msg(audit_priority(errno),
-			"Error sending status request (%s)", strerror(-rc));
+			"%s: Error sending status request (%s)",
+			get_progname(), strerror(-rc));
 	return rc;
 }
 
@@ -788,7 +790,7 @@ int audit_add_watch_dir(int type, struct audit_rule_data **rulep,
 			const char *path)
 {
 	size_t len = strlen(path);
-	struct audit_rule_data *rule = *rulep;
+	struct audit_rule_data *rule = *rulep, *tmp;
 
 	if (rule && rule->field_count) {
 		audit_msg(LOG_ERR, "Rule is not empty");
@@ -799,12 +801,16 @@ int audit_add_watch_dir(int type, struct audit_rule_data **rulep,
 		return -1;
 	}
 
-	*rulep = realloc(rule, len + sizeof(*rule));
-	if (*rulep == NULL) {
+	// Use a temporary pointer to prevent memory leaks
+	tmp = realloc(rule, len + sizeof(*rule));
+	if (tmp == NULL) {
 		free(rule);
+		*rulep = NULL;
 		audit_msg(LOG_ERR, "Cannot realloc memory!");
 		return -1;
 	}
+
+	*rulep = tmp;
 	rule = *rulep;
 	memset(rule, 0, len + sizeof(*rule));
 
@@ -828,6 +834,7 @@ int audit_add_watch_dir(int type, struct audit_rule_data **rulep,
 
 	return  0;
 }
+
 
 int audit_add_rule_data(int fd, struct audit_rule_data *rule,
                         int flags, int action)
@@ -1074,10 +1081,10 @@ int audit_rule_io_uringbyname_data(struct audit_rule_data *rule,
 }
 
 int audit_rule_interfield_comp_data(struct audit_rule_data **rulep,
-					 const char *pair,
+					 char *pair,
 					 int flags)
 {
-	const char *f = pair;
+	char *f = pair;
 	char       *v;
 	int        op;
 	int        field1, field2;
@@ -1441,6 +1448,8 @@ int audit_determine_machine(const char *arch)
 		machine = MACH_S390;
 	else if (bits == ~__AUDIT_ARCH_64BIT && machine == MACH_AARCH64)
 		machine = MACH_ARM;
+	else if (bits == ~__AUDIT_ARCH_64BIT && machine == MACH_RISCV64)
+		machine = MACH_RISCV32;
 
 	/* Check for errors - return -6
 	 * We don't allow 32 bit machines to specify 64 bit. */
@@ -1470,10 +1479,17 @@ int audit_determine_machine(const char *arch)
 				return -6; /* 64 bit only */
 			break;
 #endif
+#ifdef WITH_RISCV
+		case MACH_RISCV32:
+			if (bits == __AUDIT_ARCH_64BIT)
+				return -6;
+			break;
+#endif
 		case MACH_86_64:   /* fallthrough */
 		case MACH_PPC64:   /* fallthrough */
 		case MACH_S390X:   /* fallthrough */
 		case MACH_IO_URING:
+		case MACH_RISCV64: /* fallthrough */
 			break;
 		case MACH_PPC64LE: /* 64 bit only */
 			if (bits && bits != __AUDIT_ARCH_64BIT)
@@ -1515,6 +1531,48 @@ int _audit_parse_syscall(const char *optarg, struct audit_rule_data *rule)
 	return audit_rule_syscallbyname_data(rule, optarg);
 }
 
+/*
+ * Filters unsupported syscalls from a comma-separated string based
+ * on the given architecture. Returns a new string with supported syscalls
+ * or NULL on error.
+ */
+static char* filter_supported_syscalls(const char* syscalls, int machine)
+{
+	if (syscalls == NULL) {
+		return NULL;
+	}
+
+	char buf[512] = "";
+	char* ptr = buf;
+	const char* delimiter = ",";
+
+	char* syscalls_copy = strdup(syscalls);
+	if (syscalls_copy == NULL)
+		return NULL;
+
+	char* token = strtok(syscalls_copy, delimiter);
+	int first = 1; // Track if this is the first syscall being added
+
+	while (token != NULL) {
+		if (audit_name_to_syscall(token, machine) != -1) {
+			if (!first)
+				*ptr++ = ',';
+			ptr = stpcpy(ptr, token);
+			first = 0;
+		}
+		token = strtok(NULL, delimiter);
+	}
+
+	free(syscalls_copy);
+
+	// If no valid syscalls were found, return NULL
+	if (ptr == buf) {
+		return NULL;
+	}
+
+	return strdup(buf);
+}
+
 static int audit_add_perm_syscalls(int perm, struct audit_rule_data *rule)
 {
 	// We only get here if syscall notation is being used in the rule.
@@ -1527,33 +1585,49 @@ static int audit_add_perm_syscalls(int perm, struct audit_rule_data *rule)
 		return 0;
 	}
 
+	const int machine = audit_elf_to_machine(_audit_elf);
 	const char *syscalls = audit_perm_to_name(perm);
-	int rc = _audit_parse_syscall(syscalls, rule);
+	const char *syscalls_to_use;
+
+	// The permtab table is hardcoded, but some syscalls, like rename
+	// on arm64, are unavailable on certain architectures. To ensure compatibility,
+	// we must avoid creating rules with unsupported syscalls.
+	char* filtered_syscalls = filter_supported_syscalls(syscalls, machine);
+	if (filtered_syscalls == NULL) {
+		// use original syscalls in case we failed to parse - should not happen
+		syscalls_to_use = syscalls;
+		audit_msg(LOG_WARNING, "Filtering syscalls failed; using original syscalls.");
+	} else {
+		syscalls_to_use = filtered_syscalls;
+	}
+
+	int rc = _audit_parse_syscall(syscalls_to_use, rule);
 	switch (rc)
 	{
 	case 0:
 		_audit_syscalladded = 1;
 		break;
 	case -1: // Should never happen
-		audit_msg(LOG_ERR, "Syscall name unknown: %s", syscalls);
+		audit_msg(LOG_ERR, "Syscall name unknown: %s", syscalls_to_use);
 		break;
 	default: // Error reported - do nothing here
 		break;
 	}
 
+	free(filtered_syscalls);
 	return rc;
 }
 
-int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
+int audit_rule_fieldpair_data(struct audit_rule_data **rulep, char *pair,
                               int flags)
 {
-	const char *f = pair;
+	char *f = pair;
 	char       *v;
 	int        op;
 	int        field;
 	int        vlen;
 	int        offset;
-	struct audit_rule_data *rule = *rulep;
+	struct audit_rule_data *rule = *rulep, *tmp;
 
 	if (f == NULL)
 		return -EAU_FILTERMISSING;
@@ -1766,14 +1840,14 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, const char *pair,
 			rule->values[rule->field_count] = vlen;
 			offset = rule->buflen;
 			rule->buflen += vlen;
-			*rulep = realloc(rule, sizeof(*rule) + rule->buflen);
-			if (*rulep == NULL) {
+			tmp = realloc(rule, sizeof(*rule) + rule->buflen);
+			if (tmp == NULL) {
 				free(rule);
 				audit_msg(LOG_ERR, "Cannot realloc memory!");
 				return -3;
-			} else {
-				rule = *rulep;
 			}
+			*rulep = tmp;
+			rule = tmp;
 			strncpy(&rule->buf[offset], v, vlen);
 
 			break;
@@ -2135,5 +2209,13 @@ int audit_can_read(void)
 #else
 	return (geteuid() == 0);
 #endif
+}
+
+// Leave this exposed until 2027, then hide it for good.
+// This allows programs already compiled to keep working.
+// But new programs can't see it.
+void set_aumessage_mode(message_t mode, debug_message_t debug)
+{
+	_set_aumessage_mode(mode, debug);
 }
 

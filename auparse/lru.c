@@ -24,37 +24,45 @@
 #include "config.h"
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include "lru.h"
 
 //#define DEBUG
 
-#ifdef DEBUG
-#include <syslog.h>
-#endif
-
 // Local declarations
 static void dequeue(Queue *queue);
-
-// The Queue Node will store the 'str' being cached
+static unsigned int hash_name(const char *name);
+static void remove_hash_links(Queue *queue, QNode *node);
+static void free_qnode(Queue *queue, QNode *node);
+static void evict_lru(Queue *queue);
 static QNode *new_QNode(void)
 {
 	QNode *temp = malloc(sizeof(QNode));
 	if (temp == NULL)
 		return temp;
-	temp->str = NULL;
-	temp->id = (unsigned int)-1;
-	temp->uses = 1;	// Setting to 1 because its being used
-
-	// Initialize prev and next as NULL
+	temp->name = NULL;
+	temp->uid = (uid_t)-1;
+	temp->uses = 1;
 	temp->prev = temp->next = NULL;
-
 	return temp;
 }
+
+static Hash *create_hash(unsigned int hsize);
+static void destroy_hash(Hash *hash);
+#ifdef DEBUG
+static void dump_queue_stats(const Queue *q)
+{
+	syslog(LOG_DEBUG, "%s queue size: %u", q->name, q->total);
+	syslog(LOG_DEBUG, "%s slots in use: %u", q->name, q->count);
+	syslog(LOG_DEBUG, "%s hits: %lu", q->name, q->hits);
+	syslog(LOG_DEBUG, "%s misses: %lu", q->name, q->misses);
+	syslog(LOG_DEBUG, "%s evictions: %lu", q->name, q->evictions);
+}
+#endif
 
 static Hash *create_hash(unsigned int hsize)
 {
 	unsigned int i;
-
 	Hash *hash = malloc(sizeof(Hash));
 	if (hash == NULL)
 		return hash;
@@ -65,7 +73,6 @@ static Hash *create_hash(unsigned int hsize)
 		return NULL;
 	}
 
-	// Initialize all hash entries as empty
 	for (i = 0; i < hsize; i++)
 		hash->array[i] = NULL;
 
@@ -78,16 +85,22 @@ static void destroy_hash(Hash *hash)
 	free(hash);
 }
 
-#ifdef DEBUG
-static void dump_queue_stats(const Queue *q)
+/*
+ * hash_name - djb2 string hash
+ * @name: string to hash
+ *
+ * The djb2 algorithm offers a good balance between speed and
+ * distribution for short account names, which makes it a reasonable
+ * choice for indexing within the small LRU caches used here.
+ */
+static unsigned int hash_name(const char *name)
 {
-	syslog(LOG_DEBUG, "%s queue size: %u", q->name, q->total);
-	syslog(LOG_DEBUG, "%s slots in use: %u", q->name, q->count);
-	syslog(LOG_DEBUG, "%s hits: %lu", q->name, q->hits);
-	syslog(LOG_DEBUG, "%s misses: %lu", q->name, q->misses);
-	syslog(LOG_DEBUG, "%s evictions: %lu", q->name, q->evictions);
+	unsigned int h = 5381;
+	unsigned char c;
+	while ((c = *(const unsigned char *)name++))
+		h = ((h << 5) + h) + c;
+	return h;
 }
-#endif
 
 static Queue *create_queue(unsigned int qsize, const char *name)
 {
@@ -127,10 +140,10 @@ static void destroy_queue(Queue *queue)
 	free(queue);
 }
 
-static unsigned int are_all_slots_full(const Queue *queue)
+/*static unsigned int are_all_slots_full(const Queue *queue)
 {
 	return queue->count == queue->total;
-}
+}*/
 
 static unsigned int queue_is_empty(const Queue *queue)
 {
@@ -257,108 +270,157 @@ out:
 	sanity_check_queue(queue, "2 remove_node");
 }
 
+static void remove_hash_links(Queue *queue, QNode *node)
+{
+	unsigned int key;
+	if (node->uid != (uid_t)-1) {
+		key = node->uid % queue->total;
+		if (queue->uid_hash->array[key] == node)
+			queue->uid_hash->array[key] = NULL;
+	}
+	if (node->name) {
+		key = hash_name(node->name) % queue->total;
+		if (queue->name_hash->array[key] == node)
+			queue->name_hash->array[key] = NULL;
+	}
+}
+
+static void free_qnode(Queue *queue, QNode *node)
+{
+	remove_hash_links(queue, node);
+	remove_node(queue, node);
+	free(node->name);
+	free(node);
+	queue->count--;
+}
+
+static void evict_lru(Queue *queue)
+{
+	if (queue_is_empty(queue))
+		return;
+	free_qnode(queue, queue->end);
+	queue->evictions++;
+}
+
 // Remove from the end of the queue
 static void dequeue(Queue *queue)
 {
 	if (queue_is_empty(queue))
 		return;
 
-	QNode *temp = queue->end;
-	remove_node(queue, queue->end);
-
-//	if (queue->cleanup)
-//		queue->cleanup(temp->str); 
-	free(temp->str);
-	free(temp);
-
-	// decrement the total of full slots by 1
-	queue->count--;
+	free_qnode(queue, queue->end);
 }
 
-// Remove front of the queue because its a mismatch
-void lru_evict(Queue *queue, unsigned int key)
+
+/*
+ * check_lru_uid - find or create cache entry for a uid
+ * @queue: cache queue to search
+ * @uid:   uid to locate
+ *
+ * Looks up the uid in the uid_hash table. On a hit the node is moved
+ * to the front of the queue and returned. On a miss a new node is
+ * allocated at the front of the queue, evicting the least recently
+ * used entry if necessary.
+ */
+QNode *check_lru_uid(Queue *queue, uid_t uid)
 {
-	if (queue_is_empty(queue))
-		return;
+	QNode *node;
+	unsigned int key;
 
-	Hash *hash = queue->hash;
-	QNode *temp = queue->front;
+	if (queue == NULL)
+		return NULL;
 
-	hash->array[key] = NULL;
-	remove_node(queue, queue->front);
+	key = uid % queue->total;
+	node = queue->uid_hash->array[key];
 
-//	if (queue->cleanup)
-//		queue->cleanup(temp->str);
-	free(temp->str);
-	free(temp);
-
-        // decrement the total of full slots by 1
-	queue->count--;
-	queue->evictions++;
-}
-
-// Make a new entry with str to be assigned later
-// and setup the hash key
-static void enqueue(Queue *queue, unsigned int key)
-{
-	QNode *temp;
-	Hash *hash = queue->hash;
-
-	// If all slots are full, remove the page at the end
-	if (are_all_slots_full(queue)) {
-		// remove page from hash
-		hash->array[key] = NULL;
-		dequeue(queue);
+	if (node && node->uid == uid) {
+		if (node != queue->front) {
+			remove_node(queue, node);
+			insert_beginning(queue, node);
+		}
+		node->uses++;
+		queue->hits++;
+		return node;
 	}
 
-	// Create a new node with given page total,
-	// And add the new node to the front of queue
-	temp = new_QNode();
+	queue->misses++;
 
-	insert_beginning(queue, temp); 
-	hash->array[key] = temp;
- 
-	// increment number of full slots
+	if (node)
+		free_qnode(queue, node);
+	else if (queue->count == queue->total)
+		evict_lru(queue);
+
+	node = new_QNode();
+	if (node == NULL)
+		return NULL;
+	node->uid = uid;
+	insert_beginning(queue, node);
+	queue->uid_hash->array[key] = node;
 	queue->count++;
+	return node;
 }
- 
-// This function is called needing a str from cache.
-//  There are two scenarios:
-// 1. Item is not in cache, so add it to the front of the queue
-// 2. Item is in cache, we move the str to front of queue
-QNode *check_lru_cache(Queue *queue, unsigned int key)
-{
-	QNode *reqPage;
-	Hash *hash = queue->hash;
 
-	// Check for out of bounds key
-	if (key >= queue->total) {
+/*
+ * check_lru_name - find or create cache entry for a name
+ * @queue: cache queue to search
+ * @name:  user name to locate
+ *
+ * Uses the djb2 hash to index into the name_hash table. On a hit the
+ * node is moved to the front of the queue and returned. On a miss a
+ * new node with the provided name is allocated and inserted at the
+ * front, evicting the least recently used entry if the cache is full.
+ */
+QNode *check_lru_name(Queue *queue, const char *name)
+{
+	QNode *node;
+	unsigned int key;
+
+	if (queue == NULL || name == NULL)
+		return NULL;
+
+	key = hash_name(name) % queue->total;
+	node = queue->name_hash->array[key];
+
+	if (node && node->name && strcmp(node->name, name) == 0) {
+		if (node != queue->front) {
+			remove_node(queue, node);
+			insert_beginning(queue, node);
+		}
+		node->uses++;
+		queue->hits++;
+		return node;
+	}
+
+	queue->misses++;
+
+	if (node)
+		free_qnode(queue, node);
+	else if (queue->count == queue->total)
+		evict_lru(queue);
+
+	node = new_QNode();
+	if (node == NULL)
+		return NULL;
+	node->name = strdup(name);
+	if (node->name == NULL) {
+		free(node);
 		return NULL;
 	}
-
-	reqPage = hash->array[key];
- 
-	// str is not in cache, make new spot for it
-	if (reqPage == NULL) {
-		enqueue(queue, key);
-		queue->misses++;
- 
-	// str is there but not at front. Move it
-	} else if (reqPage != queue->front) {
-		remove_node(queue, reqPage);
-		reqPage->next = NULL; 
-		reqPage->prev = NULL; 
-		insert_beginning(queue, reqPage);
- 
-		// Increment cached object metrics
-		queue->front->uses++;
-		queue->hits++;
-	} else
-		queue->hits++;
-
-	return queue->front;
+	insert_beginning(queue, node);
+	queue->name_hash->array[key] = node;
+	queue->count++;
+	return node;
 }
 
+/*
+ * init_lru - create a dual-key LRU cache
+ * @qsize:   maximum number of entries in the cache
+ * @cleanup: optional callback to free user data
+ * @name:    identifier used in debug messages
+ *
+ * Allocates a queue with parallel hash tables: uid_hash is indexed by
+ * simple modulo of the uid and name_hash uses the djb2 string hash.
+ */
 Queue *init_lru(unsigned int qsize, void (*cleanup)(void *),
 		const char *name)
 {
@@ -367,25 +429,30 @@ Queue *init_lru(unsigned int qsize, void (*cleanup)(void *),
 		return q;
 
 	q->cleanup = cleanup;
-	q->hash = create_hash(qsize);
+	q->uid_hash = create_hash(qsize);
+	q->name_hash = create_hash(qsize);
+	if (q->uid_hash == NULL || q->name_hash == NULL) {
+		if (q->uid_hash)
+			destroy_hash(q->uid_hash);
+		if (q->name_hash)
+			destroy_hash(q->name_hash);
+		free(q);
+		return NULL;
+	}
 
 	return q;
 }
 
 void destroy_lru(Queue *queue)
 {
+	Hash *uid_hash, *name_hash;
+
 	if (queue == NULL)
 		return;
 
-	destroy_hash(queue->hash);
+	uid_hash = queue->uid_hash;
+	name_hash = queue->name_hash;
 	destroy_queue(queue);
+	destroy_hash(uid_hash);
+	destroy_hash(name_hash);
 }
-
-unsigned int compute_subject_key(const Queue *queue, unsigned int uid)
-{
-	if (queue)
-		return uid % queue->total;
-	else
-		return 0;
-}
-

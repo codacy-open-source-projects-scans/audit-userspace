@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <syslog.h>
 #include <time.h>  // nanosleep
 #include <errno.h>
@@ -22,6 +23,9 @@
 #include "reactions.h"
 #include "session.h"
 #include "timer-services.h"
+#include "account.h"
+#include "common.h"
+//#include "auparse.h"
 
 // Returns 0 on success and 1 on failure
 static int safe_exec(const char *exe, ...)
@@ -44,12 +48,30 @@ static int safe_exec(const char *exe, ...)
 			"Audit IDS failed to fork doing safe_exec");
 		return 1;
 	}
-	if (pid)        /* Parent */
-		return 0; // FIXME: should we waitpid to know if it succeeded?
+	if (pid) {       /* Parent */
+		int status;
+
+		if (waitpid(pid, &status, 0) < 0) {
+			syslog(LOG_ALERT,
+				"Audit IDS waitpid failed for %s", exe);
+			return 1;
+		}
+		if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+			return 0;
+
+		syslog(LOG_ALERT, "Audit IDS %s exited abnormally", exe);
+		return 1;
+	}
 
 	/* Child */
 	sigfillset (&sa.sa_mask);
 	sigprocmask (SIG_UNBLOCK, &sa.sa_mask, 0);
+#ifdef HAVE_CLOSE_RANGE
+	close_range(3, ~0U, 0); /* close all past stderr */
+#else
+	for (i=3; i<24; i++)     /* Arbitrary number */
+		close(i);
+#endif
 
 	va_start(ap, exe);
 	for (i = 1; va_arg(ap, char *) != NULL; i++);
@@ -206,19 +228,26 @@ int lock_account_timed(const char *acct, unsigned long length)
 	if (rc)
 		return rc;
 
-	add_timer_job(UNLOCK_ACCOUNT, acct, length);
-
-	return 0;
+	return add_timer_job(UNLOCK_ACCOUNT, acct, length);
 }
 
 int block_ip_address(const char *addr)
 {
+#ifdef USE_NFTABLES
+	if (debug)
+		my_printf("reaction /sbin/nft add rule inet filter input ip saddr %s drop",
+			  addr);
+	minipause();
+	return safe_exec("/usr/sbin/nft", "add", "rule", "inet", "filter",
+			"input", "ip", "saddr", addr, "drop", NULL);
+#else
 	if (debug)
 		my_printf("reaction /sbin/iptables -I INPUT -s %s -j DROP",
-							addr);
+			  addr);
 	minipause();
 	return safe_exec("/usr/sbin/iptables", "-I", "INPUT", "-s", addr,
-			"-j","DROP", NULL);
+			 "-j","DROP", NULL);
+#endif
 }
 
 int block_ip_address_timed(const char *addr, unsigned long length)
@@ -227,21 +256,12 @@ int block_ip_address_timed(const char *addr, unsigned long length)
 	if (rc)
 		return rc;
 
-	add_timer_job(UNBLOCK_ADDRESS, addr, length);
-
-	return 0;
+	return add_timer_job(UNBLOCK_ADDRESS, addr, length);
 }
-
-#define MINUTES 60
-#define HOURS   60*MINUTES
-#define DAYS    24*HOURS
-#define WEEKS   7*DAYS
-#define MONTHS  30*DAYS
 
 static void block_address(unsigned int reaction, const char *reason)
 {
-	// FIXME: This should be configurable
-	unsigned time_out = 2*MINUTES;
+	unsigned time_out = config.block_address_time;
 	int res;
 	char buf[80];
 	origin_data_t *o = current_origin();
@@ -272,12 +292,21 @@ static void block_address(unsigned int reaction, const char *reason)
 
 int unblock_ip_address(const char *addr)
 {
+#ifdef USE_NFTABLES
+	if (debug)
+		my_printf("reaction /sbin/nft delete rule inet filter input ip saddr %s drop",
+			  addr);
+	minipause();
+	return safe_exec("/usr/sbin/nft", "delete", "rule", "inet", "filter",
+			"input", "ip", "saddr", addr, "drop", NULL);
+#else
 	if (debug)
 		my_printf("reaction /sbin/iptables -D INPUT -s %s -j DROP",
-							addr);
+			  addr);
 	minipause();
 	return safe_exec("/usr/sbin/iptables", "-D", "INPUT", "-s", addr,
 			"-j","DROP", NULL);
+#endif
 }
 
 int system_reboot(void)
@@ -304,32 +333,69 @@ void do_reaction(unsigned int answer, const char *reason)
 		unsigned int tmp = 1 << num;
 		if (answer & tmp) {
 			switch (tmp) {
-				// FIXME: do the reactions
+				// FIXME: Need to add audit events for these
 				case REACTION_IGNORE:
 					break;
+				// FIXME: do these reactions
 				case REACTION_LOG:
 				case REACTION_EMAIL:
+					break;
 				case REACTION_TERMINATE_PROCESS:
+					{/*
+					auparse_first_record(au);
+					if (auparse_find_field(au, "pid")) {
+					    int pid = auparse_get_field_int(au);
+					    kill_process(pid);
+					}
+					*/}
 					break;
 				case REACTION_TERMINATE_SESSION:
-				{
-					// FIXME: need to add audit events
+					{
 					session_data_t *s = current_session();
 					kill_session(s->session);
+					}
 					break;
-				}
 				case REACTION_RESTRICT_ROLE:
+					{
+					account_data_t *a = current_account();
+					if (a)
+					    restricted_role(a->name);
+					}
+					break;
 				case REACTION_PASSWORD_RESET:
+					{
+					account_data_t *a = current_account();
+					if (a)
+					    force_password_reset(a->name);
+					}
+					break;
 				case REACTION_LOCK_ACCOUNT_TIMED:
+					{
+					account_data_t *a = current_account();
+					if (a)
+					    lock_account_timed(a->name,
+						config.lock_account_time);
+					}
+					break;
 				case REACTION_LOCK_ACCOUNT:
+					{
+					account_data_t *a = current_account();
+					if (a)
+					    lock_account(a->name);
+					}
 					break;
 				case REACTION_BLOCK_ADDRESS_TIMED:
 				case REACTION_BLOCK_ADDRESS:
 					block_address(tmp, reason);
 					break;
 				case REACTION_SYSTEM_REBOOT:
+					system_reboot();
+					break;
 				case REACTION_SYSTEM_SINGLE_USER:
+					system_single_user();
+					break;
 				case REACTION_SYSTEM_HALT:
+					system_halt();
 					break;
 				default:
 					if (debug)

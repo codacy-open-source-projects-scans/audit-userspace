@@ -20,7 +20,9 @@
 #
 
 AM_CPPFLAGS = -I${top_srcdir}/lib
+AM_CFLAGS = -D_GNU_SOURCE -Wno-pointer-sign ${WFLAGS}
 check_PROGRAMS = lookup_test
 TESTS = $(check_PROGRAMS)
 
 lookup_test_LDADD = ${top_builddir}/lib/libaudit.la
+lookup_test_DEPENDENCIES = ${top_builddir}/lib/libaudit.la

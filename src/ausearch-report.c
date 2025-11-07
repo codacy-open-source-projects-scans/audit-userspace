@@ -34,6 +34,10 @@
 #include "auparse.h"
 #include "auparse-idata.h"
 #include "auditd-config.h"
+#include "normalize-internal.h"	// pid list
+
+static int interp_init = 0;
+static auparse_state_t *au = NULL;
 
 /* Local functions */
 static void output_raw(llist *l);
@@ -49,6 +53,9 @@ static void text_event(auparse_state_t *au,
 
 extern time_t lol_get_eoe_timeout(void);
 
+static auparse_state_t *feed_au = NULL;
+
+
 /* The machine based on elf type */
 static unsigned long machine = -1;
 static int cur_syscall = -1;
@@ -62,15 +69,21 @@ static int loaded = 0;
 void ausearch_load_interpretations(const lnode *n)
 {
 	if (loaded == 0) {
-		_auparse_load_interpretations(n->interp);
+		if (!interp_init) {
+			au = auparse_init(AUSOURCE_BUFFER, "");
+			if (au == NULL)
+				return;
+			interp_init = 1;
+		}
+		_auparse_load_interpretations(au, n->interp);
 		loaded = 1;
 	}
 }
 
 void ausearch_free_interpretations(void)
 {
-	if (loaded) {
-		_auparse_free_interpretations();
+	if (loaded && au) {
+		_auparse_free_interpretations(au);
 		loaded = 0;
 	}
 }
@@ -249,7 +262,7 @@ no_print:
 
 		// look back to last space - this is name
 		name = ptr;
-		while (*name != ' ' && name > str)
+		while (name > str && name[-1] != ' ')
 			--name;
 		*ptr++ = 0;
 
@@ -382,7 +395,7 @@ static void report_interpret(char *name, char *val, int comma, int rtype)
 	id.val = val;
 	id.cwd = NULL;
 
-	char *out = auparse_do_interpretation(type, &id, escape_mode);
+	char *out = auparse_do_interpretation(au, type, &id, escape_mode);
 	if (type == AUPARSE_TYPE_UNCLASSIFIED)
 		printf("%s%c", val, comma ? ',' : ' ');
 	else if (name[0] == 'k' && strcmp(name, "key") == 0) {
@@ -679,6 +692,7 @@ static void csv_event(auparse_state_t *au,
 
 /* This function will output a normalized line of audit
  * fields one line per event as an english sentence */
+extern int auparse_normalize_object_kind_int(const auparse_state_t *au);
 static void text_event(auparse_state_t *au,
 		auparse_cb_event_t cb_event_type, void *user_data)
 {
@@ -788,6 +802,33 @@ static void text_event(auparse_state_t *au,
 		printf("to %s ", val);
 	}
 
+	// Print pid list if process group
+	int kind = auparse_normalize_object_kind_int(au);
+	if (kind == NORM_WHAT_PROCESS_GROUP || kind == NORM_WHAT_PROCESS) {
+		rc = auparse_normalize_object_first_attribute(au);
+		if (rc == 1) {
+			int sep = 0, cnt = 1;
+			putchar('(');
+			do {
+				const char *name = auparse_get_field_name(au);
+				if (strcmp(name, "opid") == 0) {
+					if (sep)
+						putchar(',');
+					printf("%s",
+					       auparse_interpret_field(au));
+					sep = 1;
+				}
+			       rc = auparse_normalize_object_next_attribute(au);
+			       cnt++;
+			} while (rc == 1 && cnt < 4);
+			if (cnt >= 4)
+				printf(",...)");
+			else
+				putchar(')');
+			putchar(' ');
+		}
+	}
+
 	how = auparse_normalize_how(au);
 	if (how && action && *action != 'e')   // Don't print for ended-session
 		printf("using %s", how);
@@ -797,7 +838,6 @@ static void text_event(auparse_state_t *au,
 
 /* This function will push an event into auparse. The callback arg will
  * perform all formatting for the intended report option. */
-static auparse_state_t *au = NULL;
 static void feed_auparse(llist *l, auparse_callback_ptr callback)
 {
 	const lnode *n;
@@ -808,30 +848,30 @@ static void feed_auparse(llist *l, auparse_callback_ptr callback)
 		fprintf(stderr, "Error - no elements in record.");
 		return;
 	}
-	if (au == NULL) {
-		au = auparse_init(AUSOURCE_FEED, 0);
-		auparse_set_escape_mode(au, escape_mode);
+	if (feed_au == NULL) {
+		feed_au = auparse_init(AUSOURCE_FEED, 0);
+		auparse_set_escape_mode(feed_au, escape_mode);
 		auparse_set_eoe_timeout(lol_get_eoe_timeout());
-		auparse_add_callback(au, callback, NULL, NULL);
-	}
+		auparse_add_callback(feed_au, callback, NULL, NULL);
+       }
 	do {
 		// Records need to be terminated by a newline
 		// Temporarily replace it.
 		if (l->fmt == LF_ENRICHED)
 			n->message[n->mlen] = AUDIT_INTERP_SEPARATOR;
 		n->message[n->tlen] = 0x0a;
-		auparse_feed(au, n->message, n->tlen+1);
+		auparse_feed(feed_au, n->message, n->tlen+1);
 		if (l->fmt == LF_ENRICHED)
 			n->message[n->mlen] = 0;
 		n->message[n->tlen] = 0;
 	} while ((n=list_next(l)));
 
-	auparse_flush_feed(au);
+	auparse_flush_feed(feed_au);
 }
 
 void output_auparse_finish(void)
 {
-	if (au)
-		auparse_destroy(au);
-	au = NULL;
+	if (feed_au)
+		auparse_destroy(feed_au);
+	feed_au = NULL;
 }

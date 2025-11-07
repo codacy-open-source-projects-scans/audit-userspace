@@ -16,6 +16,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include "ids_config.h"
+#include "common.h"
 
 #define CONFIG_FILE "/etc/audit/ids.conf"
 extern char *audit_strsplit(char *s);
@@ -69,6 +70,10 @@ static int option_root_login_weight_parser(struct nv_pair *nv, int line,
 		struct ids_conf *config);
 static int option_bad_login_weight_parser(struct nv_pair *nv, int line,
 		struct ids_conf *config);
+static int block_address_time_parser(struct nv_pair *nv, int line,
+		struct ids_conf *config);
+static int lock_account_time_parser(struct nv_pair *nv, int line,
+		struct ids_conf *config);
 
 static const struct kw_value reactions[] =
 {
@@ -104,6 +109,8 @@ static const struct kw_pair keywords[] =
   {"option_root_login_allowed",		option_root_login_allowed_parser },
   {"option_root_login_weight",		option_root_login_weight_parser },
   {"option_bad_login_weight",		option_bad_login_weight_parser },
+  {"block_address_time",		block_address_time_parser },
+  {"lock_account_time",			lock_account_time_parser },
 };
 
 void reset_config(struct ids_conf *config)
@@ -117,6 +124,8 @@ void reset_config(struct ids_conf *config)
 	config->option_root_login_allowed = 0;
 	config->option_root_login_weight = 5;
 	config->option_bad_login_weight = 1;
+	config->block_address_time = 12 * HOURS;
+	config->lock_account_time = 20 * MINUTES;
 }
 
 void free_config(struct ids_conf *config __attribute__((unused)))
@@ -141,6 +150,10 @@ void dump_config(struct ids_conf *config, FILE *f)
 			config->option_root_login_weight);
 	fprintf(f, "option_bad_login_weight: %u\n",
 			config->option_bad_login_weight);
+	fprintf(f, "block_address_time: %u\n",
+			config->block_address_time);
+	fprintf(f, "lock_account_time: %u\n",
+			config->lock_account_time);
 }
 
 int load_config(struct ids_conf *config)
@@ -462,5 +475,79 @@ static int option_bad_login_weight_parser(struct nv_pair *nv, int line,
 {
 	return unsigned_int_parser(nv, line,
 		&config->option_bad_login_weight);
+}
+
+static int block_address_time_parser(struct nv_pair *nv, int line,
+		struct ids_conf *config)
+{
+	char *end;
+	unsigned long i;
+
+	errno = 0;
+	i = strtoul(nv->value, &end, 10);
+	if (errno || nv->value == end) {
+		syslog(LOG_ERR,
+			"Error converting %s to a number - line %d",
+			nv->value, line);
+		return 1;
+	}
+
+	if (*end && end[1]) {
+		syslog(LOG_ERR,
+			"Unexpected characters in %s - line %d",
+			nv->value, line);
+		return 1;
+	}
+
+	switch (*end) {
+		case 'm':
+			i *= MINUTES;
+			break;
+		case 'h':
+			i *= HOURS;
+			break;
+		case 'd':
+			i *= DAYS;
+			break;
+		case 'M':
+			i *= MONTHS;
+			break;
+		case '\0':
+			break;
+		default:
+			syslog(LOG_ERR,
+				"Unknown time unit in %s - line %d",
+				nv->value, line);
+			return 1;
+	}
+
+	// Set an arbitrary limit of 500 days
+	if (i > (500 * DAYS)) {
+		syslog(LOG_ERR,
+		       "block_address_time = %s exceeds the max of 500 days - line %d",
+		       nv->value, line);
+		return 1;
+	}
+	config->block_address_time = (unsigned int)i;
+	return 0;
+}
+
+static int lock_account_time_parser(struct nv_pair *nv, int line,
+		struct ids_conf *config)
+{
+	long i;
+
+	i = time_string_to_seconds(nv->value, "ids", line);
+	if (i < 0)
+		return 1;
+
+	if (i > (500 * DAYS)) {
+		syslog(LOG_ERR,
+		 "lock_account_time = %s exceeds the max of 500 days - line %d",
+		 nv->value, line);
+		return 1;
+	}
+	config->lock_account_time = (unsigned int)i;
+	return 0;
 }
 

@@ -40,6 +40,16 @@
 #ifndef __wur
 # define __wur
 #endif
+// malloc and free assignments
+#ifndef __attr_dealloc
+# define __attr_dealloc(dealloc, argno)
+#endif
+#ifndef __attr_dealloc_free
+# define __attr_dealloc_free
+#endif
+#ifndef __attribute_malloc__
+#  define __attribute_malloc__
+#endif
 
 #include <audit_logging.h>
 
@@ -180,7 +190,9 @@ typedef enum {
 	MACH_ARM,
 	MACH_AARCH64,
 	MACH_PPC64LE,
-	MACH_IO_URING
+	MACH_IO_URING,
+	MACH_RISCV32,
+	MACH_RISCV64
 } machine_t;
 
 /* These are the valid audit failure tunable enum values */
@@ -189,11 +201,6 @@ typedef enum {
 	FAIL_LOG,
 	FAIL_TERMINATE
 } auditfail_t;
-
-/* Messages */
-typedef enum { MSG_STDERR, MSG_SYSLOG, MSG_QUIET } message_t;
-typedef enum { DBG_NO, DBG_YES } debug_message_t;
-void set_aumessage_mode(message_t mode, debug_message_t debug);
 
 /* General */
 typedef enum { GET_REPLY_BLOCKING=0, GET_REPLY_NONBLOCKING } reply_t;
@@ -279,8 +286,11 @@ int audit_delete_rule_data(int fd, struct audit_rule_data *rule,
                                   int flags, int action);
 
 /* Rule-building helper functions */
+/* Deallocates the audit_rule_rule object, and any associated resources */
+void audit_rule_free_data(struct audit_rule_data *rule);
 /* Heap-allocates and initializes an audit_rule_data */
-struct audit_rule_data *audit_rule_create_data(void);
+struct audit_rule_data *audit_rule_create_data(void)
+	__attribute_malloc__ __attr_dealloc (audit_rule_free_data, 1);
 /* Initializes an existing audit_rule_data struct */
 void audit_rule_init_data(struct audit_rule_data *rule);
 int audit_rule_syscallbyname_data(struct audit_rule_data *rule,
@@ -288,20 +298,18 @@ int audit_rule_syscallbyname_data(struct audit_rule_data *rule,
 int audit_rule_io_uringbyname_data(struct audit_rule_data *rule,
                                           const char *scall);
 
-/* Note that the following function takes a **, where audit_rule_fieldpair()
- * takes just a *.  That structure may need to be reallocated as a result of
- * adding new fields */
+/* Note that the following function takes a **. That structure may need
+ * to be reallocated as a result of adding new fields */
 int audit_rule_fieldpair_data(struct audit_rule_data **rulep,
-                                      const char *pair, int flags);
+                                      char *pair, int flags);
 int audit_rule_interfield_comp_data(struct audit_rule_data **rulep,
-					 const char *pair, int flags);
-/* Deallocates the audit_rule_rule object, and any associated resources */
-void audit_rule_free_data(struct audit_rule_data *rule);
+					 char *pair, int flags);
 
 /* Capability testing functions */
 int audit_can_control(void);
 int audit_can_write(void);
 int audit_can_read(void);
+
 
 #ifdef __cplusplus
 }

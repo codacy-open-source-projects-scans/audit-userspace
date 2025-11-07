@@ -145,9 +145,11 @@ static int plugin_dir_parser(const struct nv_pair *nv, int line,
 		struct daemon_conf *config);
 static int eoe_timeout_parser(const struct nv_pair *nv, int line,
 		struct daemon_conf *config);
+static int report_interval_parser(const struct nv_pair *nv, int line,
+		struct daemon_conf *config);
 static int sanity_check(struct daemon_conf *config);
 
-static const struct kw_pair keywords[] = 
+static const struct kw_pair keywords[] =
 {
   {"local_events",             local_events_parser,		0},
   {"write_logs",               write_logs_parser,		0 },
@@ -188,6 +190,7 @@ static const struct kw_pair keywords[] =
   {"max_restarts",             max_restarts_parser,             0 },
   {"plugin_dir",               plugin_dir_parser,               0 },
   {"end_of_event_timeout",     eoe_timeout_parser,              0 },
+  {"report_interval",          report_interval_parser,          0 },
   { NULL,                      NULL,                            0 }
 };
 
@@ -227,6 +230,7 @@ static const struct nv_list size_actions[] =
 {
   {"ignore",  SZ_IGNORE },
   {"syslog",  SZ_SYSLOG },
+  {"exec",    SZ_EXEC },
   {"suspend", SZ_SUSPEND },
   {"rotate",  SZ_ROTATE },
   {"keep_logs", SZ_KEEP_LOGS},
@@ -310,6 +314,7 @@ void clear_config(struct daemon_conf *config)
 	config->node_name = NULL;
 	config->max_log_size = 0L;
 	config->max_log_size_action = SZ_IGNORE;
+	config->max_log_file_exe = NULL;
 	config->space_left = 0L;
 	config->space_left_percent = 0;
 	config->space_left_action = FA_IGNORE;
@@ -341,6 +346,7 @@ void clear_config(struct daemon_conf *config)
 	config->plugin_dir = strdup("/etc/audit/plugins.d");
 	config->config_dir = NULL;
 	config->end_of_event_timeout = EOE_TIMEOUT;
+	config->report_interval = 0;
 }
 
 static log_test_t log_test = TEST_AUDITD;
@@ -499,7 +505,6 @@ static char *get_line(FILE *f, char *buf, unsigned size, int *lineno,
 			}
 			// Reset and start with the next line
 			too_long = 0;
-			*lineno = *lineno + 1;
 		} else {
 			// If a line is too long skip it.
 			// Only output 1 warning
@@ -509,6 +514,7 @@ static char *get_line(FILE *f, char *buf, unsigned size, int *lineno,
 					*lineno, file);
 			too_long = 1;
 		}
+		*lineno = *lineno + 1;
 	}
 	return NULL;
 }
@@ -794,6 +800,52 @@ static int max_log_size_parser(const struct nv_pair *nv, int line,
 	return 0;
 }
 
+static int check_exe_name(const char *val, int line)
+{
+	struct stat buf;
+
+	if (val == NULL) {
+		audit_msg(LOG_ERR, "Executable path needed for line %d", line);
+		return -1;
+	}
+
+	if (*val != '/') {
+		audit_msg(LOG_ERR, "Absolute path needed for %s - line %d",
+			val, line);
+		return -1;
+	}
+
+	if (stat(val, &buf) < 0) {
+		audit_msg(LOG_ERR, "Unable to stat %s (%s) - line %d", val,
+			strerror(errno), line);
+		return -1;
+	}
+	if (!S_ISREG(buf.st_mode)) {
+		audit_msg(LOG_ERR, "%s is not a regular file - line %d", val,
+			line);
+		return -1;
+	}
+	if (buf.st_uid != 0) {
+		audit_msg(LOG_ERR, "%s is not owned by root - line %d", val,
+			line);
+		return -1;
+	}
+	if ((buf.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) !=
+			   (S_IRWXU|S_IRGRP|S_IXGRP) &&
+	    (buf.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) !=
+			   (S_IRWXU|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH) &&
+	    (buf.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) !=
+			   (S_IRUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH) &&
+	    (buf.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) !=
+			   (S_IRUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH)) {
+		audit_msg(LOG_ERR,
+			"%s permissions should be 0750, 0755, 0555 or 0550 - line %d",
+			val, line);
+		return -1;
+	}
+	return 0;
+}
+
 static int max_log_size_action_parser(const struct nv_pair *nv, int line, 
 		struct daemon_conf *config)
 {
@@ -803,6 +855,11 @@ static int max_log_size_action_parser(const struct nv_pair *nv, int line,
 		nv->value);
 	for (i=0; size_actions[i].name != NULL; i++) {
 		if (strcasecmp(nv->value, size_actions[i].name) == 0) {
+			if (size_actions[i].option == SZ_EXEC) {
+				if (check_exe_name(nv->option, line))
+					return 1;
+				config->max_log_file_exe = strdup(nv->option);
+			}
 			config->max_log_size_action = size_actions[i].option;
 			return 0;
 		}
@@ -970,52 +1027,6 @@ static int space_left_parser(const struct nv_pair *nv, int line,
 	return 0;
 }
 
-static int check_exe_name(const char *val, int line)
-{
-	struct stat buf;
-
-	if (val == NULL) {
-		audit_msg(LOG_ERR, "Executable path needed for line %d", line);
-		return -1;
-	}
-
-	if (*val != '/') {
-		audit_msg(LOG_ERR, "Absolute path needed for %s - line %d",
-			val, line);
-		return -1;
-	}
-
-	if (stat(val, &buf) < 0) {
-		audit_msg(LOG_ERR, "Unable to stat %s (%s) - line %d", val,
-			strerror(errno), line);
-		return -1;
-	}
-	if (!S_ISREG(buf.st_mode)) {
-		audit_msg(LOG_ERR, "%s is not a regular file - line %d", val,
-			line);
-		return -1;
-	}
-	if (buf.st_uid != 0) {
-		audit_msg(LOG_ERR, "%s is not owned by root - line %d", val,
-			line);
-		return -1;
-	}
-	if ((buf.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) !=
-			   (S_IRWXU|S_IRGRP|S_IXGRP) &&
-	    (buf.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) !=
-			   (S_IRWXU|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH) &&
-	    (buf.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) !=
-			   (S_IRUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH) &&
-	    (buf.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) !=
-			   (S_IRUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH)) {
-		audit_msg(LOG_ERR,
-			"%s permissions should be 0750, 0755, 0555 or 0550 - line %d",
-			val, line);
-		return -1;
-	}
-	return 0;
-}
-
 static int space_action_parser(const struct nv_pair *nv, int line, 
 		struct daemon_conf *config)
 {
@@ -1034,6 +1045,11 @@ static int space_action_parser(const struct nv_pair *nv, int line,
 				if (check_exe_name(nv->option, line))
 					return 1;
 				config->space_left_exe = strdup(nv->option);
+			} else if (failure_actions[i].option == FA_HALT) {
+				audit_msg(LOG_ERR,
+					"The HALT option in space_left_action has been deprecated"
+					" to prevent system instability from premature shutdowns.");
+				return 1;
 			}
 			config->space_left_action = failure_actions[i].option;
 			return 0;
@@ -1041,6 +1057,13 @@ static int space_action_parser(const struct nv_pair *nv, int line,
 	}
 	audit_msg(LOG_ERR, "Option %s not found - line %d", nv->value, line);
 	return 1;
+}
+
+const char *failure_action_to_str(unsigned int action)
+{
+	if (action > FA_HALT)
+		return "unknown";
+	return failure_actions[action].name;
 }
 
 // returns 0 if OK, 1 on temp error, 2 on permanent error
@@ -1064,7 +1087,7 @@ static int validate_email(const char *acct)
 	for (i=0; i<len; i++) {
 		if (! (isalnum(acct[i]) || (acct[i] == '@') ||
 				(acct[i]=='.') || (acct[i]=='-') ||
-				(acct[i] == '_')) ) {
+				(acct[i] == '_') || (acct[i] == '+')) ) {
 			audit_msg(LOG_ERR, "email: %s has illegal character",
 				acct);
 			return 2;
@@ -1088,6 +1111,7 @@ static int validate_email(const char *acct)
 		hints.ai_flags = AI_ADDRCONFIG | AI_CANONNAME;
 		hints.ai_socktype = SOCK_STREAM;
 
+		h_errno = 0;
 		rc2 = getaddrinfo(ptr1+1, NULL, &hints, &ai);
 		if (rc2 != 0) {
 			if ((h_errno == HOST_NOT_FOUND) ||
@@ -1095,9 +1119,6 @@ static int validate_email(const char *acct)
 				audit_msg(LOG_ERR,
 			"validate_email: failed looking up host for %s (%s)",
 					ptr1+1, gai_strerror(rc2));
-				// FIXME: How can we tell that we truly have
-				// a permanent failure and what is that? For
-				// now treat all as temp failure.
 			} else if (h_errno == TRY_AGAIN) {
 				audit_msg(LOG_DEBUG,
 		"validate_email: temporary failure looking up domain for %s",
@@ -1871,8 +1892,32 @@ static int eoe_timeout_parser(const struct nv_pair *nv, int line,
 	return 0;
 }
 
+static int report_interval_parser(const struct nv_pair *nv, int line,
+				  struct daemon_conf *config)
+{
+	long i;
+
+	i = time_string_to_seconds(nv->value, "auditd", line);
+	if (i < 0)
+		return 1;
+
+	if (i > 6*HOURS)
+	    audit_msg(LOG_WARNING,
+	      "Warning - report_interval is more than 6 hours apart - line %d",
+			line);
+
+	if (i > 40*DAYS) {
+		audit_msg(LOG_ERR,
+			"Error - report_interval (%s) is too large - line %d",
+			nv->value, line);
+		return 1;
+	}
+	config->report_interval = (unsigned int)i;
+	return 0;
+}
+
 /*
- * Query file system and calculate in MB the given percentage is.
+ * Query file system and calculate in MiB the given percentage is.
  * Returns 0 on error and a number otherwise.
  */
 static unsigned long calc_percent(float percent, int fd)
@@ -1885,7 +1930,7 @@ static unsigned long calc_percent(float percent, int fd)
 		unsigned long free_space;
 		// All blocks * percentage = free blocks threshold
 		fsblkcnt_t free_blocks = buf.f_blocks * (percent/100.0);
-		// That is then converted into megabytes and returned
+		// That is then converted into mebibytes and returned
 		free_space = (buf.f_bsize * free_blocks) / MEGABYTE;
 
 		return free_space;
@@ -1895,7 +1940,7 @@ static unsigned long calc_percent(float percent, int fd)
 
 /*
  * This function translates a percentage of disk space to the
- * actual MB value for space left actions.
+ * actual MiB value for space left actions.
  */
 void setup_percentages(struct daemon_conf *config, int fd)
 {
@@ -1993,14 +2038,15 @@ void free_config(struct daemon_conf *config)
 	free((void *)config->log_file);
 	free((void *)config->node_name);
 	free((void *)config->action_mail_acct);
+	free((void *)config->max_log_file_exe);
 	free((void *)config->space_left_exe);
-        free((void *)config->admin_space_left_exe);
-        free((void *)config->disk_full_exe);
-        free((void *)config->disk_error_exe);
-        free((void *)config->krb5_principal);
-        free((void *)config->krb5_key_file);
+	free((void *)config->admin_space_left_exe);
+	free((void *)config->disk_full_exe);
+	free((void *)config->disk_error_exe);
+	free((void *)config->krb5_principal);
+	free((void *)config->krb5_key_file);
 	free((void *)config->plugin_dir);
-        free((void *)config_dir);
+	free((void *)config_dir);
 	free(config_file);
         config_file = NULL;
 	config->config_dir = NULL;

@@ -1,4 +1,4 @@
-.TH AUDITD.CONF "5" "August 2018" "Red Hat" "System Administration Utilities"
+.TH AUDITD.CONF "5" "June 2025" "Red Hat" "System Administration Utilities"
 .SH NAME
 auditd.conf \- audit daemon configuration file
 .SH DESCRIPTION
@@ -17,7 +17,9 @@ has no effect.
 .TP
 .I log_file
 This keyword specifies the full path name to the log file where audit records
-will be stored. It must be a regular file.
+will be stored. It must be a regular file. The default path is
+.I /var/log/audit/audit.log
+if not explicitly set.
 .TP
 .I write_logs
 This yes/no keyword determines whether or not to write logs to the disk.
@@ -102,18 +104,24 @@ is given as the
 option.
 .TP
 .I max_log_file
-This keyword specifies the maximum file size in megabytes. When this limit
+This keyword specifies the maximum file size in mebibytes (MiB). When this limit
 is reached, it will trigger a configurable action. The value given must be numeric.
 .TP
 .I max_log_file_action
 This parameter tells the system what action to take when the system has
 detected that the max file size limit has been reached. Valid values are
-.IR ignore ", " syslog ", " suspend ", " rotate " and "keep_logs.
+.IR ignore ", " syslog ", " exec ", " suspend ", " rotate " and "keep_logs.
 If set to
 .IR ignore ,
 the audit daemon does nothing.
 .IR syslog
 means that it will issue a warning to syslog.
+.IR exec
+/path-to-script will execute the script. You cannot pass parameters to the script. The script is also responsible for telling the auditd daemon to resume logging once its completed its action. This can be done by adding 
+.I auditdctl --signal resume
+to the script. Also note that logging is stpped which this script runs. Whatever it does needs to be real quick because events are backing up in the kernel. The script
+.B MUST
+delete or rename /var/log/audit/audit.log or when logging resumes, it will retrigger executing the script.
 .IR suspend
 will cause the audit daemon to stop writing records to the disk. The daemon will still be alive. The
 .IR rotate
@@ -131,7 +139,9 @@ is checked to see if the domain name can be resolved. This option must be given 
 or the default value of yes will be used.
 .TP
 .I action_mail_acct
-This option should contain a valid email address or alias. The default address is root. If the email address is not local to the machine, you must make sure you have email properly configured on your machine and network. Also, this option requires that /usr/lib/sendmail exists on the machine.
+This option should contain a valid email address or alias. Addresses may use RFC
+5233 style subaddressing with the '+' character. The allowed characters are
+alphanumerics, '@', '.', '-', '_', and '+'. The default address is root. If the email address is not local to the machine, you must make sure you have email properly configured on your machine and network. This this option requires that /usr/lib/sendmail exists on the machine. Many clients provide it as a symlink.
 .TP
 .I space_left
 If the free space in the filesystem containing
@@ -140,7 +150,7 @@ drops below this value, the audit daemon takes the action specified by
 .IR space_left_action .
 If the value of
 .IR space_left
-is specified as a whole number, it is interpreted as an absolute size in megabytes (MiB).  If the value is specified as a number between 1 and 99 followed by a percentage sign (e.g., 5%), the audit daemon calculates the absolute size in megabytes based on the size of the filesystem containing
+is specified as a whole number, it is interpreted as an absolute size in mebibytes (MiB).  If the value is specified as a number between 1 and 99 followed by a percentage sign (e.g., 5%), the audit daemon calculates the absolute size in mebibytes based on the size of the filesystem containing
 .IR log_file .
 (E.g., if the filesystem containing
 .IR log_file
@@ -148,7 +158,7 @@ is 2 gigabytes in size, and
 .IR space_left
 is set to 25%, then the audit daemon sets 
 .IR space_left
-to approximately 500 megabytes.  Note that this calculation is performed when the audit daemon starts, so if you resize the filesystem containing
+to approximately 500 mebibytes.  Note that this calculation is performed when the audit daemon starts, so if you resize the filesystem containing
 .IR log_file
 while the audit daemon is running, you should send the audit daemon SIGHUP to re-read the configuration file and recalculate the correct percentage.
 .TP
@@ -156,7 +166,7 @@ while the audit daemon is running, you should send the audit daemon SIGHUP to re
 This parameter tells the system what action to take when the system has
 detected that it is starting to get low on disk space.
 Valid values are
-.IR ignore ", " syslog ", " rotate ", " email ", " exec ", " suspend ", " single ", and " halt .
+.IR ignore ", " syslog ", " rotate ", " email ", " exec ", " suspend ", and " single .
 If set to
 .IR ignore ,
 the audit daemon does nothing.
@@ -173,12 +183,23 @@ as well as sending the message to syslog.
 .I suspend
 will cause the audit daemon to stop writing records to the disk. The daemon will still be alive. The
 .I single
-option will cause the audit daemon to put the computer system in single user mode. The
+option will cause the audit daemon to put the computer system in single user mode. Except for rotate, it will perform this action just one time. The previously available
 .I halt
-option will cause the audit daemon to shutdown the computer system. Except for rotate, it will perform this action just one time.
+option, which would cause the audit daemon to shut down the computer system, has been deprecated and should no longer be used. It was determined that halting the system at this stage could lead to unintended consequences and is considered a bad action if selected.
+
+Disk space notifications follow a three-stage progression. The
+.I space_left_action
+is the low water mark and serves as the first warning that disk space is running low. Halting at this stage is not recommended, as it prevents administrators from taking corrective action. The next stage,
+.I admin_space_left_action,
+indicates an emergency level where immediate action is required to free up disk space. Administrators should configure critical responses for this level. Finally, the
+.I disk_full_action
+occurs when the disk is completely full. At this stage, the system may have already halted, and preemptive measures configured in earlier stages will determine the system’s behavior.
+
+
+
 .TP
 .I admin_space_left
-This is a numeric value in megabytes that tells the audit daemon when
+This is a numeric value in mebibytes (MiB) that tells the audit daemon when
 to perform a configurable action because the system
 .B is running low
 on disk space. This should be considered the last chance to do something before running out of disk space. The numeric value for this parameter should be lower than the number for space_left. You may also append a percent sign (e.g. 1%) to the number to have the audit daemon calculate the number based on the disk partition size.
@@ -255,7 +276,9 @@ records from remote systems. The audit daemon may be linked with
 tcp_wrappers. You may want to control access with an entry in the
 hosts.allow and deny files. If this is deployed on a systemd based
 OS, then you may need to adjust the 'After' directive. See the note in
-the auditd.service file.
+the auditd.service file.  Networking can be enabled by adding this
+option and sending auditd a SIGHUP.  Changing the port or disabling
+networking requires restarting the daemon so that clients reconnect.
 .TP
 .I tcp_listen_queue
 This is a numeric value which indicates how many pending (requested
@@ -263,7 +286,9 @@ but unaccepted) connections are allowed.  The default is 5.  Setting
 this too small may cause connections to be rejected if too many hosts
 start up at exactly the same time, such as after a power failure. This
 setting is only used for aggregating servers. Clients logging to a remote
-server should keep this commented out.
+server should keep this commented out.  Changing this value while the
+daemon is running restarts the listener and drops any current
+connections.
 .TP
 .I tcp_max_per_addr
 This is a numeric value which indicates how many concurrent connections from
@@ -297,7 +322,9 @@ If set to
 .IR TCP ",
 only clear text tcp connections will be used. If set to
 .IR KRB5 ",
-then Kerberos 5 will be used for authentication and encryption. The default value is TCP.
+then Kerberos 5 will be used for authentication and encryption. The
+default value is TCP.  Changes to this option take effect only after
+restart so that clients can reconnect.
 .TP
 .I enable_krb5
 This option is deprecated. Use the
@@ -348,7 +375,9 @@ option will cause the audit daemon to shutdown the computer system.
 This is a non-negative number that tells the audit event dispatcher how many times it can try to restart a crashed plugin. The default is 10.
 .TP
 .I plugin_dir
-This is the location that auditd will use to search for its plugin configuration files.
+This is the location that auditd will use to search for its plugin configuration files. The default directory is
+.I /etc/audit/plugins.d
+.
 .TP
 .I end_of_event_timeout
 This is a non-negative number of seconds used by the userspace
@@ -359,7 +388,33 @@ library routines and the
 .I ausearch(8)
 utilities to consider an event is complete when parsing an event log stream. For an event stream being processed, if the time of the current event is over
 .I end_of_event_timeout
-seconds old, compared to co-located events, then the event is considered complete. See the NOTES section for more detail.
+seconds old, compared to co-located events, then the event is considered complete. The default is 2 seconds. See the NOTES section for more detail.
+.TP
+.I report_interval
+This option specifies the interval between automatic state reports. The
+value is a time string composed of a number optionally followed by
+.B m
+for minutes,
+.B h
+for hours,
+.B d
+for days, or
+.B M
+for months.
+The default is 0 which disables preriodic reporting. The largest value is 40 days. When set, auditd will periodically generate the state report written to
+.I /run/audit/auditd.state.
+.SH RELOADING
+Most parameters can be changed while the daemon is running by sending
+.B SIGHUP
+to
+.BR auditd .
+This can also be done with
+.BR auditctl\ \-\-signal\ reload .
+Options that are only read at startup include
+.I local_events
+and
+.I verify_email
+.
 .SH NOTES
 In a CAPP environment, the audit trail is considered so important that access to system resources must be denied if an audit trail cannot be created. In this environment, it would be suggested that /var/log/audit be on its own partition. This is to ensure that space detection is accurate and that no other process comes along and consumes part of it.
 .PP
@@ -421,6 +476,10 @@ record type >= AUDIT_MAC_UNLBL_ALLOW && record type <= AUDIT_MAC_CALIPSO_DEL (th
 for the stream being processed, the time of the event is over end_of_event_timeout seconds old.
 .RE
 
+.SH LOG ROTATION POLICY
+
+By default, auditd uses size-based log rotation. If you prefer time-based rotation (e.g., hourly, daily, weekly, or custom schedule), refer to auditd.cron(5) for configuration details.
+
 .SH FILES
 .TP
 .I /etc/audit/auditd.conf
@@ -429,7 +488,8 @@ Audit daemon configuration file
 .SH "SEE ALSO"
 .BR auditd (8),
 .BR audisp\-remote.conf (5),
-.BR auditd\-plugins (5).
+.BR auditd\-plugins (5),
+.BR auditd.cron (5).
 
 .SH AUTHOR
 Steve Grubb

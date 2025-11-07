@@ -37,20 +37,23 @@
 #include <limits.h>
 #include <sys/uio.h>
 #include <getopt.h>
-#ifdef HAVE_ATOMIC
-#include <stdatomic.h>
-#endif
 
 #include "audispd-pconfig.h"
 #include "audispd-config.h"
 #include "audispd-llist.h"
 #include "queue.h"
 #include "libaudit.h"
+#include "common.h"	// For ATOMIC_LOAD/STORE
 #include "private.h"
 
 /* Global Data */
+#ifdef HAVE_ATOMIC
+static ATOMIC_INT stop = 0;
+ATOMIC_INT disp_hup = 0;
+#else
 static volatile ATOMIC_INT stop = 0;
 volatile ATOMIC_INT disp_hup = 0;
+#endif
 
 /* Local data */
 static daemon_conf_t daemon_config;
@@ -108,16 +111,19 @@ static void load_plugin_conf(conf_llist *plugin)
 	/* read configs */
 	d = opendir(daemon_config.plugin_dir);
 	if (d) {
+		int dfd = dirfd(d);
+		if (dfd < 0) {
+			closedir(d);
+			return;
+		}
+
 		struct dirent *e;
 
 		while ((e = readdir(d))) {
 			plugin_conf_t config;
-			char fname[PATH_MAX];
 			const char *ext, *reason = NULL;
 
-			if (e->d_type != DT_REG)
-				reason = "not a regular file";
-			else if (e->d_name[0] == '.')
+			if (e->d_name[0] == '.')
 				reason = "hidden file";
 			else if (count_dots(e->d_name) > 1)
 				reason = "backup file";
@@ -129,11 +135,8 @@ static void load_plugin_conf(conf_llist *plugin)
 				continue;
 			}
 
-			snprintf(fname, sizeof(fname), "%s/%s",
-				daemon_config.plugin_dir, e->d_name);
-
 			clear_pconfig(&config);
-			if (load_pconfig(&config, fname) == 0) {
+			if (load_pconfig(&config, dfd, e->d_name) == 0) {
 				/* Push onto config list only if active */
 				if (config.active == A_YES)
 					plist_append(plugin, &config);
@@ -150,8 +153,11 @@ static void load_plugin_conf(conf_llist *plugin)
 
 static int start_one_plugin(lnode *conf)
 {
-	if (conf->p->restart_cnt > daemon_config.max_restarts)
-		return 1;
+	if (conf->p->restart_cnt > daemon_config.max_restarts) {
+		/* Do not mark active when max restarts exceeded */
+		conf->p->active = A_NO;
+		return 0;
+	}
 
 	if (conf->p->type == S_ALWAYS) {
 		if (safe_exec(conf->p)) {
@@ -386,11 +392,12 @@ static void *outbound_thread_main(void *arg)
 		"After reconfigure, there are no active plugins, exiting");
 			break;
 		}
-		disp_hup = 0;
+		AUDIT_ATOMIC_STORE(disp_hup, 0);
 	}
 
 	/* Tell plugins we are going down */
 	signal_plugins(SIGTERM);
+	usleep(15000); // 15 milliseconds - let plugins wrap up
 
 	/* Release configs */
 	plist_first(&plugin_conf);
@@ -405,7 +412,7 @@ static void *outbound_thread_main(void *arg)
 	destroy_queue();
 	free(daemon_config.plugin_dir);
 	daemon_config.plugin_dir = NULL;
-	audit_msg(LOG_DEBUG, "Finished cleaning up dispatcher");
+	audit_msg(LOG_INFO, "Dispatcher plugins cleaned up");
 
 	return 0;
 }
@@ -414,6 +421,7 @@ static int safe_exec(plugin_conf_t *conf)
 {
 	char **argv;
 	int pid, i;
+	struct sigaction sa;
 
 	/* Set up IPC with child */
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, conf->plug_pipe) != 0)
@@ -431,22 +439,28 @@ static int safe_exec(plugin_conf_t *conf)
 		return -1;	/* Failed to fork */
 	}
 
-	/* Set up comm with child */
+	/* Set up comm with child. It reads stdin so put the pipe there. */
 	if (dup2(conf->plug_pipe[0], 0) < 0) {
 		close(conf->plug_pipe[0]);
 		close(conf->plug_pipe[1]);
-		conf->pid = 0;
-		return -1;	/* Failed to fork */
+		exit(1);
 	}
+#ifdef HAVE_CLOSE_RANGE
+	close_range(3, ~0U, 0);	/* close all past stderr */
+#else
 	for (i=3; i<24; i++)	 /* Arbitrary number */
 		close(i);
+#endif
 
 	argv = calloc(conf->nargs + 2, sizeof(char *));
 	if (argv == NULL) {
-		return -1;
+		exit(1);
 	}
 
 	/* Child */
+	sigfillset (&sa.sa_mask);
+	sigprocmask (SIG_UNBLOCK, &sa.sa_mask, 0);
+
 	argv[0] = (char *)conf->path;
 	for (i = 0; i < conf->nargs; i++) {
 		argv[i+1] = conf->args[conf->nargs-i-1];
@@ -454,12 +468,16 @@ static int safe_exec(plugin_conf_t *conf)
 	argv[conf->nargs+1] = NULL;
 
 	execve(conf->path, argv, NULL);
+	free(argv);		/* Free memory before exit */
 	exit(1);		/* Failed to exec */
 }
 
 static void signal_plugins(int sig)
 {
 	lnode *conf;
+
+	if (sig == SIGTERM)
+		audit_msg(LOG_INFO, "Terminating plugins");
 
 	plist_first(&plugin_conf);
 	conf = plist_get_cur(&plugin_conf);
@@ -486,7 +504,7 @@ static int write_to_plugin(event_t *e, const char *string, size_t string_len,
 		vec[0].iov_len = sizeof(struct audit_dispatcher_header);
 
 		vec[1].iov_base = e->data;
-		vec[1].iov_len = MAX_AUDIT_MESSAGE_LENGTH;
+		vec[1].iov_len = e->hdr.size;
 		do {
 			rc = writev(conf->p->plug_pipe[1], vec, 2);
 		} while (rc < 0 && errno == EINTR);
@@ -495,19 +513,20 @@ static int write_to_plugin(event_t *e, const char *string, size_t string_len,
 }
 
 /* Returns 0 on stop, and 1 on HUP */
+static char fmt_buf[FORMAT_BUF_LEN];
 static int event_loop(void)
 {
 	/* Figure out the format for the af_unix socket */
-	while (stop == 0) {
+	while (AUDIT_ATOMIC_LOAD(stop) == 0) {
 		event_t *e;
-		char *v, *ptr, unknown[32];
+		char *ptr, unknown[32];
 		int len;
 		lnode *conf;
 
 		/* This is where we block until we have an event */
 		e = dequeue();
 		if (e == NULL) {
-			if (disp_hup)
+			if (AUDIT_ATOMIC_LOAD(disp_hup))
 				return 1;
 			continue;
 		}
@@ -523,23 +542,33 @@ static int event_loop(void)
 					"UNKNOWN[%u]", e->hdr.type);
 				type = unknown;
 			}
-			len = asprintf(&v, "type=%s msg=%.*s\n",
+			len = snprintf(fmt_buf, sizeof(fmt_buf),
+				       "type=%s msg=%.*s\n",
 					type, e->hdr.size, e->data);
-		// Protocol 2 events are already formatted
+		// Protocol 2 events are already formatted - just copy
 		} else if (e->hdr.ver == AUDISP_PROTOCOL_VER2) {
-			len = asprintf(&v, "%.*s\n", e->hdr.size, e->data);
+			size_t to_copy = e->hdr.size;
+
+			if (to_copy > MAX_AUDIT_MESSAGE_LENGTH)
+				to_copy = MAX_AUDIT_MESSAGE_LENGTH;
+
+			// was snprintf, this is faster
+			memcpy(fmt_buf, e->data, to_copy);
+
+			fmt_buf[to_copy]     = '\n';
+			fmt_buf[to_copy + 1] = '\0';
+			len = (int)(to_copy + 1);
 		} else
 			len = 0;
 		if (len <= 0) {
-			v = NULL;
 			free(e); /* Either corrupted event or no memory */
 			continue;
 		}
 
-		/* Strip newlines from event record */
-		ptr = v;
+		/* Strip newlines from event record except the last one */
+		ptr = fmt_buf;
 		while ((ptr = strchr(ptr, 0x0A)) != NULL) {
-			if (ptr != &v[len-1])
+			if (ptr != &fmt_buf[len-1])
 				*ptr = ' ';
 			else
 				break; /* Done - exit loop */
@@ -551,16 +580,17 @@ static int event_loop(void)
 		do {
 			if (conf == NULL || conf->p == NULL)
 				continue;
-			if (conf->p->active == A_NO || stop)
+			if (conf->p->active == A_NO || AUDIT_ATOMIC_LOAD(stop))
 				continue;
 
 			/* Now send the event to the child */
-			if (conf->p->type == S_ALWAYS && !stop) {
+			if (conf->p->type == S_ALWAYS &&
+					!AUDIT_ATOMIC_LOAD(stop)) {
 				int rc;
-				rc = write_to_plugin(e, v, len, conf);
+				rc = write_to_plugin(e, fmt_buf, len, conf);
 				if (rc < 0 && errno == EPIPE) {
 					/* Child disappeared ? */
-					if (!stop)
+					if (!AUDIT_ATOMIC_LOAD(stop))
 						audit_msg(LOG_ERR,
 					"plugin %s terminated unexpectedly",
 								conf->p->path);
@@ -569,32 +599,32 @@ static int event_loop(void)
 					close(conf->p->plug_pipe[1]);
 					conf->p->plug_pipe[1] = -1;
 					conf->p->active = A_NO;
-					if (!stop && conf->p->restart_cnt >
-						daemon_config.max_restarts) {
+					if (!AUDIT_ATOMIC_LOAD(stop) &&
+					    conf->p->restart_cnt >
+					    daemon_config.max_restarts) {
 						audit_msg(LOG_ERR,
 					"plugin %s has exceeded max_restarts",
 								conf->p->path);
-					}
-					if (!stop && start_one_plugin(conf)) {
-						rc = write_to_plugin(e, v, len,
-								     conf);
+					} else if (!AUDIT_ATOMIC_LOAD(stop) && start_one_plugin(conf)) {
+						rc = write_to_plugin(e, fmt_buf,
+								     len, conf);
 						audit_msg(LOG_NOTICE,
-						"plugin %s was restarted",
-							conf->p->path);
+						"plugin %s was restarted (%ux)",
+							conf->p->path, conf->p->restart_cnt);
 						conf->p->active = A_YES;
 					}
 				}
 			}
-		} while (!stop && (conf = plist_next(&plugin_conf)));
+		} while (!AUDIT_ATOMIC_LOAD(stop) &&
+			 (conf = plist_next(&plugin_conf)));
 
 		/* Done with the memory...release it */
-		free(v);
 		free(e);
-		if (disp_hup)
+		if (AUDIT_ATOMIC_LOAD(disp_hup))
 			break;
 	}
 	audit_msg(LOG_DEBUG, "Dispatcher event loop exit");
-	if (stop)
+	if (AUDIT_ATOMIC_LOAD(stop))
 		return 0;
 	else
 		return 1;
@@ -607,7 +637,12 @@ int libdisp_active(void)
 	return plist_count(&plugin_conf);
 }
 
-/* returns 0 on success and -1 on error */
+/*
+ * returns 0 on success,
+ * 1 if the event could not be queued due to overflow or
+ * when processing is suspended, and
+ * -1 on other errors
+ */
 int libdisp_enqueue(event_t *e)
 {
 	return enqueue(e, &daemon_config);
@@ -631,7 +666,7 @@ void libdisp_reconfigure(const struct daemon_conf *c)
 		libdisp_init(c);
 	else { // Otherwise we do a reconfigure
 			copy_config(c);
-			disp_hup = 1;
+			AUDIT_ATOMIC_STORE(disp_hup, 1);
 			nudge_queue();
 	}
 }
@@ -651,7 +686,7 @@ void libdisp_resume(void)
 /* Used during startup and something failed */
 void libdisp_shutdown(void)
 {
-	stop = 1;
+	AUDIT_ATOMIC_STORE(stop, 1);
 	libdisp_nudge_queue();
 }
 

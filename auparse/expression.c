@@ -391,23 +391,39 @@ parse_timestamp_value(struct expr *dest, struct parsing *p)
 	 * On a timestamp field we will do all the parsing ourselves
 	 * rather than use lex(). At the end we will move the internal cursor.
 	 */
-	if (sscanf(p->token_start, "ts:%jd.%u:%u", &sec,
-		   &dest->v.p.value.timestamp_ex.milli,
-		   &dest->v.p.value.timestamp_ex.serial) != 3) {
-		if (sscanf(p->token_start, "ts:%jd.%u", &sec,
-			   &dest->v.p.value.timestamp.milli) != 2) {
+	int ret;
+
+	ret = sscanf(p->token_start, "ts:%jd.%u:%u", &sec,
+		     &dest->v.p.value.timestamp_ex.milli,
+		     &dest->v.p.value.timestamp_ex.serial);
+	if (ret != 3) {
+		ret = sscanf(p->token_start, "ts:%jd.%u", &sec,
+			     &dest->v.p.value.timestamp.milli);
+		if (ret != 2) {
 			if (asprintf(p->error, "Invalid timestamp value `%.*s'",
 				     p->token_len, p->token_start) < 0)
 				*p->error = NULL;
 			return -1;
 		}
+		if (dest->v.p.value.timestamp.milli >= 1000) {
+			if (asprintf(p->error,
+				     "Millisecond out of range in `%.*s'",
+				     p->token_len, p->token_start) < 0)
+				*p->error = NULL;
+			return -1;
+		}
+	} else if (dest->v.p.value.timestamp_ex.milli >= 1000) {
+		if (asprintf(p->error,
+			     "Millisecond out of range in `%.*s'",
+			     p->token_len, p->token_start) < 0)
+			*p->error = NULL;
+		return -1;
 	}
 
 	/* Move the cursor past what we parsed. */
 	size_t num = strspn(p->token_start, "ts:0123456789.");
 	p->src = p->token_start + num;
 
-	/* FIXME: validate milli */
 	dest->v.p.value.timestamp.sec = sec;
 	if (dest->v.p.value.timestamp.sec != sec) {
 		if (asprintf(p->error, "Timestamp overflow in `%.*s'",
@@ -1018,7 +1034,7 @@ eval_interpreted_value(const auparse_state_t *au, rnode *record,
 		if (nvlist_find_name(&record->nv, expr->v.p.field.name) == 0)
 			return NULL;
 		*free_it = 0;
-		res = nvlist_interp_cur_val(record, au->escape_mode);
+		res = nvlist_interp_cur_val((auparse_state_t *)au, record);
 		if (res == NULL)
 			res = nvlist_get_cur_val(&record->nv);
 		return (char *)res;
@@ -1079,13 +1095,13 @@ compare_values(const auparse_state_t *au, const rnode *record,
 		break;
 
 	case EF_TIMESTAMP_EX:
-		if (au->le->e.sec < expr->v.p.value.timestamp.sec)
+		if (au->le->e.sec < expr->v.p.value.timestamp_ex.sec)
 			res = -1;
-		else if (au->le->e.sec > expr->v.p.value.timestamp.sec)
+		else if (au->le->e.sec > expr->v.p.value.timestamp_ex.sec)
 			res = 1;
-		else if (au->le->e.milli < expr->v.p.value.timestamp.milli)
+		else if (au->le->e.milli < expr->v.p.value.timestamp_ex.milli)
 			res = -1;
-		else if (au->le->e.milli > expr->v.p.value.timestamp.milli)
+		else if (au->le->e.milli > expr->v.p.value.timestamp_ex.milli)
 			res = 1;
 		else if (au->le->e.serial < expr->v.p.value.timestamp_ex.serial)
 			res = -1;

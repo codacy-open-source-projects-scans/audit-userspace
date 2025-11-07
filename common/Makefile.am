@@ -1,5 +1,5 @@
 # Makefile.am-- 
-# Copyright 2018-2023 Red Hat Inc.
+# Copyright 2018-2025 Red Hat Inc.
 # All Rights Reserved.
 #
 # This program is free software; you can redistribute it and/or modify
@@ -27,6 +27,6 @@ AM_CPPFLAGS = -I${top_srcdir} -I${top_srcdir}/lib
 
 noinst_HEADERS = common.h
 libaucommon_la_DEPENDENCIES = ../config.h
-libaucommon_la_SOURCES = audit-fgets.c strsplit.c common.c
+libaucommon_la_SOURCES = strsplit.c common.c message.c
 noinst_LTLIBRARIES = libaucommon.la
 

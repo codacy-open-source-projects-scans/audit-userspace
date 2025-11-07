@@ -36,8 +36,8 @@ typedef enum { LF_RAW, LF_NOLOG, LF_ENRICHED } logging_formats;
 typedef enum { FT_NONE, FT_INCREMENTAL, FT_INCREMENTAL_ASYNC, FT_DATA, FT_SYNC } flush_technique;
 typedef enum { FA_IGNORE, FA_SYSLOG, FA_ROTATE, FA_EMAIL, FA_EXEC, FA_SUSPEND,
 		FA_SINGLE, FA_HALT } failure_action_t;
-typedef enum { SZ_IGNORE, SZ_SYSLOG, SZ_SUSPEND, SZ_ROTATE, 
-		SZ_KEEP_LOGS } size_action;
+typedef enum { SZ_IGNORE, SZ_SYSLOG, SZ_EXEC, SZ_SUSPEND, SZ_ROTATE,
+               SZ_KEEP_LOGS } size_action;
 typedef enum { TEST_AUDITD, TEST_SEARCH } log_test_t;
 typedef enum { N_NONE, N_HOSTNAME, N_FQD, N_NUMERIC, N_USER } node_t;
 typedef enum { O_IGNORE, O_SYSLOG, O_SUSPEND, O_SINGLE,
@@ -63,6 +63,7 @@ struct daemon_conf
 	const char *node_name;
 	unsigned long max_log_size;
 	size_action max_log_size_action;
+	const char *max_log_file_exe;
 	unsigned long space_left;
 	unsigned int space_left_percent;
 	failure_action_t space_left_action;
@@ -77,6 +78,8 @@ struct daemon_conf
 	const char *disk_full_exe;
 	failure_action_t disk_error_action;
 	const char *disk_error_exe;
+	unsigned int report_interval;
+	// Network receiving
 	unsigned long tcp_listen_port;
 	unsigned long tcp_listen_queue;
 	unsigned long tcp_max_per_addr;
@@ -113,5 +116,7 @@ void init_config_manager(void);
 int start_config_manager(struct auditd_event *e);
 #endif
 void free_config(struct daemon_conf *config);
+
+const char *failure_action_to_str(unsigned int action);
 
 #endif

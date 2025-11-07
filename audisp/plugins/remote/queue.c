@@ -32,6 +32,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <syslog.h>
 #include "queue.h"
 
 struct queue
@@ -116,7 +117,7 @@ static int full_pwrite(int fd, const void *buf, size_t size, off_t offset)
 struct fh_state {
 	uint32_t queue_head;	/* 0-based index of the first non-empty entry */
 	uint32_t queue_length;	/* [0, num_entries] */
-};
+} __attribute__((packed));
 
 /* All integer values are in network byte order (big endian) */
 struct file_header
@@ -130,7 +131,7 @@ struct file_header
 	uint32_t num_entries;	/* Total number of entries allocated */
 	uint32_t entry_size;
 	struct fh_state s;
-};
+} __attribute__((packed));
 
 /* Contains a '\0' byte to unambiguously mark the file as a binary file. */
 static const uint8_t fh_magic[14] = "\0audisp-remote";
@@ -142,8 +143,12 @@ static size_t entry_offset (const struct queue *q, size_t entry)
 	return (entry + 1) * q->entry_size;
 }
 
-/* Synchronize Q if required and return 0.
-   On error, return -1 and set errno. */
+/*
+ * FIXME: Create a new sync method like auditd's INCREMENTAL_ASYNC.
+ * Doing fdatasync for each element is going to be a performance hit.
+ * Synchronize Q if required and return 0.
+ * On error, return -1 and set errno.
+ */
 static int q_sync(struct queue *q)
 {
 	if ((q->flags & Q_SYNC) == 0)
@@ -413,9 +418,10 @@ int q_peek(struct queue *q, char *buf, size_t size)
 		data = q->buffer;
 		end = memchr(q->buffer, '\0', q->entry_size);
 		if (end == NULL) {
-			/* FIXME: silently drop this entry? */
-			errno = EBADMSG;
-			return -1;
+			syslog(LOG_WARNING, "queue entry missing terminator");
+			if (q_drop_head(q) != 0)
+				return -1;
+			return q_peek(q, buf, size); // Return next one
 		}
 		data_size = (end - data) + 1;
 

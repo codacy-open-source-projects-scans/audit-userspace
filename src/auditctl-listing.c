@@ -38,6 +38,7 @@
 #endif
 
 /* Global vars */
+static auparse_state_t *au = NULL;
 static llist l;
 static int printed;
 extern int list_requested, interpret;
@@ -466,9 +467,9 @@ static void print_rule(const struct audit_rule_data *r)
 					id.val = val;
 					type = auparse_interp_adjust_type(
 						AUDIT_SYSCALL, name, val);
-					out = auparse_do_interpretation(type,
-							&id,
-							AUPARSE_ESC_TTY);
+					out = auparse_do_interpretation(
+						au, type, &id,
+						AUPARSE_ESC_TTY);
 					printf(" -F %s%s%s", name,
 						audit_operator_to_symbol(op),
 								out);
@@ -564,6 +565,13 @@ static const char *get_failure(unsigned f)
  */
 int audit_print_reply(const struct audit_reply *rep, int fd)
 {
+	static int init_done = 0;
+	if (!init_done) {
+		au = auparse_init(AUSOURCE_BUFFER, "");
+		if (au == NULL)
+			return 0;
+		init_done = 1;
+	}
 	_audit_elf = 0;
 
 	switch (rep->type) {

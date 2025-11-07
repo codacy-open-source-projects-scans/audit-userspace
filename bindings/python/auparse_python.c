@@ -463,14 +463,24 @@ AuParser_init(AuParser *self, PyObject *args, PyObject *kwds)
             PyErr_SetString(PyExc_TypeError, "source must be open file when source_type is AUSOURCE_FILE_POINTER");
             return -1;
 	}
+	const char *filename = NULL;
 #if PY_MAJOR_VERSION < 3
-	int fd = fileno(fp);
-	fp = fdopen(fd, "r");
+        int fd = fileno(fp);
+        fp = fdopen(fd, "r");
+        /* PyFile_Name is available in Python 2 */
+        filename = PYSTR_ASSTRING(PyFile_Name(source));
+#else
+        /* In Python 3 obtain the name attribute if possible */
+        PyObject *name_obj = PyObject_GetAttrString(source, "name");
+        if (name_obj && PYSTR_CHECK(name_obj))
+            filename = PYSTR_ASSTRING(name_obj);
+	Py_XDECREF(name_obj);
 #endif
         if ((self->au = auparse_init(source_type, fp)) == NULL) {
-            //char *filename = PYSTR_ASSTRING(PyFile_Name(source));
-            char *filename = "TODO";
-            PyErr_SetFromErrnoWithFilename(PyExc_IOError, filename);
+            if (filename)
+                PyErr_SetFromErrnoWithFilename(PyExc_IOError, filename);
+            else
+                PyErr_SetFromErrno(PyExc_IOError);
             return -1;
         }
     } break;
@@ -2509,7 +2519,7 @@ PyInit_auparse(void)
     PyModule_AddIntConstant(m, "AUPARSE_TYPE_PROCTITLE", AUPARSE_TYPE_PROCTITLE);
     PyModule_AddIntConstant(m, "AUPARSE_TYPE_HOOK", AUPARSE_TYPE_HOOK);
     PyModule_AddIntConstant(m, "AUPARSE_TYPE_NETACTION", AUPARSE_TYPE_NETACTION);
-    PyModule_AddIntConstant(m, "AUPARSE_TYPE_MACPROTO,", AUPARSE_TYPE_MACPROTO);
+    PyModule_AddIntConstant(m, "AUPARSE_TYPE_MACPROTO", AUPARSE_TYPE_MACPROTO);
     PyModule_AddIntConstant(m, "AUPARSE_TYPE_IOCTL_REQ", AUPARSE_TYPE_IOCTL_REQ);
     PyModule_AddIntConstant(m, "AUPARSE_TYPE_ESCAPED_KEY", AUPARSE_TYPE_ESCAPED_KEY);
     PyModule_AddIntConstant(m, "AUPARSE_TYPE_ESCAPED_FILE", AUPARSE_TYPE_ESCAPED_FILE);

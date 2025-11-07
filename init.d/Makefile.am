@@ -1,5 +1,5 @@
 # Makefile.am--
-# Copyright 2004-07,2012-13,2018 Red Hat Inc.
+# Copyright 2004-2025 Red Hat Inc.
 # All Rights Reserved.
 #
 # This program is free software; you can redistribute it and/or modify
@@ -28,7 +28,7 @@ EXTRA_DIST = auditd.service.in audit-rules.service.in  auditd.conf auditd.cron \
 	libaudit.conf auditd.condrestart \
 	auditd.reload auditd.restart auditd.resume \
 	auditd.rotate auditd.state auditd.stop audit-rules.service \
-	audit-stop.rules augenrules
+	audit-stop.rules augenrules audit.bash_completion
 libconfig = libaudit.conf
 initdir = $(prefix)/lib/systemd/system
 legacydir = $(libexecdir)/initscripts/legacy-actions/auditd
@@ -48,13 +48,19 @@ BUILT_SOURCES = auditd.service audit-rules.service
 
 install-data-hook:
 	$(INSTALL_DATA) -D -m 640 ${srcdir}/${libconfig} ${DESTDIR}${sysconfdir}
-	$(INSTALL_DATA) -m 640 -D -t ${DESTDIR}$(prefix)/lib/tmpfiles.d/audit.conf ${srcdir}/audit-tmpfiles.conf
+	mkdir -p ${DESTDIR}$(prefix)/lib/tmpfiles.d/
+	$(INSTALL_DATA) -m 640 ${srcdir}/audit-tmpfiles.conf ${DESTDIR}$(prefix)/lib/tmpfiles.d/audit.conf
 
 install-exec-hook:
 	mkdir -p ${DESTDIR}${initdir}
-	mkdir -p ${DESTDIR}${legacydir}
+	mkdir -p ${DESTDIR}${sysconfdir}/bash_completion.d
 	$(INSTALL_SCRIPT) -D -m 644 ${builddir}/auditd.service ${DESTDIR}${initdir}
 	$(INSTALL_SCRIPT) -D -m 644 ${builddir}/audit-rules.service ${DESTDIR}${initdir}
+	chmod 0755 $(DESTDIR)$(sbindir)/augenrules
+	$(INSTALL_SCRIPT) -D -m 644 ${srcdir}/audit.bash_completion \
+		${DESTDIR}${sysconfdir}/bash_completion.d/
+if INSTALL_LEGACY_ACTIONS
+	mkdir -p ${DESTDIR}${legacydir}
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.rotate ${DESTDIR}${legacydir}/rotate
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.resume ${DESTDIR}${legacydir}/resume
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.reload ${DESTDIR}${legacydir}/reload
@@ -62,8 +68,7 @@ install-exec-hook:
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.stop ${DESTDIR}${legacydir}/stop
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.restart ${DESTDIR}${legacydir}/restart
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.condrestart ${DESTDIR}${legacydir}/condrestart
-	chmod 0755 $(DESTDIR)$(sbindir)/augenrules
-
+endif
 
 uninstall-hook:
 	rm ${DESTDIR}${sysconfdir}/${libconfig}
@@ -76,3 +81,5 @@ uninstall-hook:
 	rm ${DESTDIR}${legacydir}/stop
 	rm ${DESTDIR}${legacydir}/restart
 	rm ${DESTDIR}${legacydir}/condrestart
+	rm ${DESTDIR}$(prefix)/lib/tmpfiles.d/audit.conf
+	rm ${DESTDIR}${sysconfdir}/bash_completion.d/audit.bash_completion

@@ -38,6 +38,7 @@
 #include <locale.h>
 #include <signal.h>
 #include "libaudit.h"
+#include "common.h"
 #include "auditd-config.h"
 #include "ausearch-options.h"
 #include "ausearch-lol.h"
@@ -105,7 +106,8 @@ int main(int argc, char *argv[])
 	limit.rlim_max = RLIM_INFINITY;
 	setrlimit(RLIMIT_FSIZE, &limit);
 	setrlimit(RLIMIT_CPU, &limit);
-	set_aumessage_mode(MSG_STDERR, DBG_NO);
+	_set_aumessage_mode(MSG_STDERR, DBG_NO);
+	set_allow_links(1); // auditd might have -l flag, ausearch should be lenient here
 	(void) umask( umask( 077 ) | 027 );
 
 	/* Load config so we know where logs are and eoe_timeout */
@@ -220,7 +222,6 @@ skip_checkpt:
 	free((char *)event_tuid);
 	free((char *)event_teuid);
 	free((char *)event_tauid);
-	auparse_destroy(NULL);
 	output_auparse_finish();
 	if (rc)
 		return rc;
@@ -235,8 +236,7 @@ skip_checkpt:
 static int process_logs(void)
 {
 	char *filename;
-	int len, num = 0;
-	int found_chkpt_file = -1;
+	int len;
 	int ret;
 
 	if (user_file && userfile_is_dir) {
@@ -244,15 +244,15 @@ static int process_logs(void)
 		clear_config (&config);
 
 		strncpy(dirname, user_file, MAXPATHLEN-32);
+		dirname[MAXPATHLEN-32] = '\0';
 		if (dirname[strlen(dirname)-1] != '/')
-				strcat(dirname, "/");
+			strcat(dirname, "/");
 		strcat (dirname, "audit.log");
 		free((void *)config.log_file);
 		config.log_file=strdup(dirname);
 		fprintf(stderr, "NOTE - using logs in %s\n", config.log_file);
 	}
 
-	/* for each file */
 	len = strlen(config.log_file) + 16;
 	filename = malloc(len);
 	if (!filename) {
@@ -260,22 +260,25 @@ static int process_logs(void)
 		free_config(&config);
 		return 1;
 	}
-	/* Find oldest log file */
-	snprintf(filename, len, "%s", config.log_file);
-	do {
-		if (access(filename, R_OK) != 0)
-			break;
-		
-		/*
-		 * If we have prior checkpoint data, we ignore files till we
-		 * find the file we last checkpointed from
-		 */
-		if (checkpt_filename && have_chkpt_data) {
+
+	/*
+	 * If we have prior checkpoint data, we ignore files till we
+	 * find the file we last checkpointed from
+         */
+	if (checkpt_filename && have_chkpt_data) {
+		int num = 0;
+		int found_chkpt_file = -1;
+
+		snprintf(filename, len, "%s", config.log_file);
+		do {
+			if (access(filename, R_OK) != 0)
+				break;
+
 			struct stat sbuf;
 
 			if (stat(filename, &sbuf)) {
 				fprintf(stderr, "Error stat'ing %s (%s)\n",
-					filename, strerror(errno));
+				filename, strerror(errno));
 				free(filename);
 				free_config(&config);
 				return 1;
@@ -284,8 +287,8 @@ static int process_logs(void)
 			 * Have we accessed the checkpointed file?
 			 * If so, stop checking further files.
 			 */
-			if (	(sbuf.st_dev == chkpt_input_dev) &&
-				(sbuf.st_ino == chkpt_input_ino) ) {
+			if ((sbuf.st_dev == chkpt_input_dev) &&
+			    (sbuf.st_ino == chkpt_input_ino)) {
 				/*
 				 * If we are ignoring all but time, then we
 				 * don't stop checking more files and just
@@ -297,30 +300,54 @@ static int process_logs(void)
 					break;
 				}
 			}
+
+			num++;
+			snprintf(filename, len, "%s.%d", config.log_file, num);
+		} while (1);
+
+		/* If a checkpoint is loaded but can't find it's file, and we
+		 * are not only just checking the timestamp from the checkpoint
+		 * file, we need to error
+		 */
+		if (found_chkpt_file == -1 && !checkpt_timeonly) {
+			free(filename);
+			free_config(&config);
+			return 10;
 		}
 
-		num++;
-		snprintf(filename, len, "%s.%d", config.log_file, num);
-	} while (1);
+		num--;
+		files_to_process = num;
+	} else { /* No checkpointing - do it the usual way */
+		struct audit_log_info *logs = NULL;
+		size_t log_cnt = 0;
 
-	/* If a checkpoint is loaded but can't find it's file, and we
-	 * are not only just checking the timestamp from the checkpoint file,
-	 * we need to error */
-	if (checkpt_filename && have_chkpt_data && found_chkpt_file == -1
-					&& !checkpt_timeonly) {
-		free(filename);
-		free_config(&config);
-		return 10;
+		/* Count logs */
+		if (audit_log_list(config.log_file, &logs, &log_cnt)) {
+			fprintf(stderr, "No memory\n");
+			free(filename);
+			free_config(&config);
+			return 1;
+		}
+
+		if (log_cnt == 0) {
+			snprintf(filename, len, "%s", config.log_file);
+			ret = process_file(filename);
+			free(filename);
+			free_config(&config);
+			audit_log_free(logs, log_cnt);
+			return ret;
+		}
+
+		/* Locate the starting file that's in range */
+		files_to_process = audit_log_find_start(logs, log_cnt,
+							start_time);
+		audit_log_free(logs, log_cnt);
 	}
 
-	num--;
-
-	/* We note how many files we need to process */
-	files_to_process = num;
-
 	/* Got it, now process logs from last to first */
-	if (num > 0)
-		snprintf(filename, len, "%s.%d", config.log_file, num);
+	if (files_to_process > 0)
+		snprintf(filename, len, "%s.%d", config.log_file,
+			 files_to_process);
 	else
 		snprintf(filename, len, "%s", config.log_file);
 	do {
@@ -331,28 +358,28 @@ static int process_logs(void)
 		}
 		if (just_one && found)
 			break;
+		if (files_to_process == 0)
+			break;
 		files_to_process--;	/* one less file to process */
 
 		/* Get next log file */
-		num--;
-		if (num > 0)
-			snprintf(filename, len, "%s.%d", config.log_file, num);
-		else if (num == 0)
-			snprintf(filename, len, "%s", config.log_file);
+		if (files_to_process > 0)
+			snprintf(filename, len, "%s.%d", config.log_file,
+				 files_to_process);
 		else
-			break;
+			snprintf(filename, len, "%s", config.log_file);
 	} while (1);
+
 	/*
- 	 * If performing a checkpoint, set the checkpointed
+	 * If performing a checkpoint, set the checkpointed
 	 * file details - ie remember the last file processed
 	 */
-	ret = 0;
 	if (checkpt_filename)
 		ret = set_ChkPtFileDetails(filename);
 
 	free(filename);
 	free_config(&config);
-	return ret;
+	return 0;
 }
 
 /*
@@ -465,18 +492,23 @@ static int process_log_fd(void)
 			break;
 
 		/*
+		 * If we are checkpointing, decide if we output this event.
+		 * We need to do it as early as here. The chkpt_input_levent event
+		 * might not match the entries, so we need to ensure that we don't
+		 * skip the event that is the checkpoint event. That is the marking point
+		 * from which we start outputting events. Leaving that event out will produce
+		 * empty results.
+		 */
+		if (checkpt_filename)
+			do_output = chkpt_output_decision(&entries->e);
+
+		/*
  		 * We flush all events on the last log file being processed.
  		 * Thus incomplete events are 'carried forward' to be
  		 * completed from the rest of it's records we expect to find
  		 * in the next file we are about to process.
  		 */
 		if (match(entries)) {
-			/*
-			 * If we are checkpointing, decide if we output
-			 * this event
-			 */
-			if (checkpt_filename)
-				do_output = chkpt_output_decision(&entries->e);
 
 			if (do_output == 1) {
 				found = 1;

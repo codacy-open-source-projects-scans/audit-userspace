@@ -121,10 +121,9 @@ static unsigned int set_subject_what(auparse_state_t *au)
 		if (n && strcmp(n, "acct") == 0) {
 			const char *acct = auparse_interpret_field(au);
 			if (acct) {
-				// FIXME: Make this a LRU item
-				struct passwd *pw = getpwnam(acct);
-				if (pw) {
-					uid = pw->pw_uid;
+				uid_t lu = lookup_uid_from_name(au, acct);
+				if (lu != (uid_t)-1) {
+					uid = lu;
 					goto check;
 				}
 			}
@@ -623,9 +622,6 @@ static int normalize_syscall(auparse_state_t *au, const char *syscall)
 	if (objtype == NORM_UNKNOWN)
 		normalize_syscall_map_s2i(syscall, &objtype);
 
-// FIXME: Need to address: landlock_*, lsm_*, map_shadow_stack, pkey_*,
-// kexec_file_load, They likely need new NORM_* types. Also, these suggest
-// that NORM_WHAT_ may need some new types.
 	switch (objtype)
 	{
 		case NORM_FILE:
@@ -654,17 +650,21 @@ static int normalize_syscall(auparse_state_t *au, const char *syscall)
 		case NORM_FILE_CHOWN:
 			act = "changed-file-ownership-of";
 			D.thing.what = NORM_WHAT_FILE; // this gets overridden
-			if (strcmp(syscall, "fchown") == 0)
+			if (strcmp(syscall, "fchown") == 0) {
 				offset = -1;
-			collect_own_obj2(au, syscall);
-			set_file_object(au, offset); // FIXME: fchown has no cwd
-			simple_file_attr(au);
+				collect_own_obj2(au, syscall);
+				/* fchown has no cwd or path information */
+			} else {
+				collect_own_obj2(au, syscall);
+				set_file_object(au, offset);
+				simple_file_attr(au);
+			}
 			break;
 		case NORM_FILE_LDMOD:
 			act = "loaded-kernel-module";
 			D.thing.what = NORM_WHAT_FILE;
 			auparse_goto_record_num(au, 1);
-			set_prime_object(au, "name", 1);// FIXME:is this needed?
+			set_prime_object(au, "name", 1);
 			break;
 		case NORM_FILE_UNLDMOD:
 			act = "unloaded-kernel-module";
@@ -778,23 +778,36 @@ static int normalize_syscall(auparse_state_t *au, const char *syscall)
 			D.thing.what = NORM_WHAT_SOCKET;
 			set_socket_object(au);
 			break;
-		case NORM_PID:
-			if (auparse_get_num_records(au) > 2)
-				// FIXME: this has implications for object
-				act = "killed-list-of-pids";
-			else
-				act = "killed-pid";
-			auparse_goto_record_num(au, 1);
-			auparse_first_field(au);
-			f = auparse_find_field(au, "saddr");
-			if (f) {
-				D.thing.primary = set_record(0,
-					auparse_get_record_num(au));
-				D.thing.primary = set_field(D.thing.primary,
-					auparse_get_field_num(au));
-			}
+		case NORM_PID: {
+			unsigned int r, cnt;
+			value_t attr;
+
+			act = "killed-pid";
 			D.thing.what = NORM_WHAT_PROCESS;
+
+			// Loop to see how many OBJ_PID we have (normally 1)
+			cnt = auparse_get_num_records(au);
+			for (r = 1; r < cnt; r++) {
+				auparse_goto_record_num(au, r);
+				if (auparse_get_type(au) != AUDIT_OBJ_PID)
+					continue;
+				auparse_first_field(au);
+				if (auparse_find_field(au, "opid")) {
+					attr = set_record(0,
+						auparse_get_record_num(au));
+					attr = set_field(attr,
+						auparse_get_field_num(au));
+					cllist_append(&D.thing.attr, attr,
+							NULL);
+				}
+			}
+			// If there's more than one, it's a process group
+			if (D.thing.attr.cnt > 1) {
+				act = "killed-list-of-pids";
+				D.thing.what = NORM_WHAT_PROCESS_GROUP;
+			}
 			break;
+		}
 		case NORM_MAC_LOAD:
 			act = normalize_record_map_i2s(ttype);
 			// FIXME: What is the object?
@@ -953,6 +966,15 @@ static int normalize_syscall(auparse_state_t *au, const char *syscall)
 				D.how = strdup(syscall);
 			}
 			break;
+		case NORM_SECURITY_ATTR:
+			act = "retrieved-security-attr-of";
+			D.thing.what = NORM_WHAT_PROCESS;
+			set_program_obj(au);
+			break;
+		case NORM_SECURITY_LIST:
+			act = "listed-security-modules";
+			D.thing.what = NORM_WHAT_SECURITY_MODULES;
+			break;
 		default:
 			{
 				const char *k;
@@ -1089,7 +1111,7 @@ static const char *normalize_determine_evkind(int type)
 	return evtype_i2s(kind);
 }
 
-const char *find_config_change_object(auparse_state_t *au)
+static const char *find_config_change_object(auparse_state_t *au)
 {
 	const char *f;
 
@@ -1266,7 +1288,33 @@ static int normalize_compound(auparse_state_t *au)
 			const char *act = normalize_record_map_i2s(otype);
 			if (act)
 				D.action = strdup(act);
-			// FIXME: AUDIT_ANOM_LINK needs an object
+			set_file_object(au, 1);
+			if (is_unset(D.thing.primary)) {
+				int r, num = auparse_get_num_records(au);
+				for (r = 1; r <= num; r++) {
+					auparse_goto_record_num(au, r);
+					if (auparse_get_type(au) == AUDIT_PATH) {
+						auparse_first_field(au);
+						set_prime_object(au, "name", r);
+						D.thing.what = NORM_WHAT_LINK;
+						break;
+					}
+				}
+				if (is_unset(D.thing.primary)) {
+					auparse_first_record(au);
+					f = auparse_find_field(au, "path");
+					if (f == NULL)
+					f = auparse_find_field(au, "cwd");
+					if (f) {
+						D.thing.primary = set_record(0,
+						    auparse_get_record_num(au));
+						D.thing.primary =
+						    set_field(D.thing.primary,
+						      auparse_get_field_num(au));
+						D.thing.what = NORM_WHAT_LINK;
+					}
+				}
+			}
 		} else if (otype == AUDIT_CONFIG_CHANGE) {
 			auparse_first_record(au);
 			f = auparse_find_field(au, "op");
@@ -1446,7 +1494,6 @@ static value_t find_simple_obj_secondary(auparse_state_t *au, int type)
 	value_t o = set_record(0, UNSET);
 	const char *f = NULL;
 
-	// FIXME: maybe pass flag indicating if this is needed
 	auparse_first_field(au);
 	switch (type)
 	{
@@ -1471,7 +1518,6 @@ static value_t find_simple_obj_primary2(auparse_state_t *au, int type)
 	value_t o = set_record(0, UNSET);
 	const char *f = NULL;
 
-	// FIXME: maybe pass flag indicating if this is needed
 	auparse_first_field(au);
 	switch (type)
 	{
@@ -1496,18 +1542,18 @@ static value_t find_simple_obj_primary2(auparse_state_t *au, int type)
 
 static void collect_simple_subj_attr(auparse_state_t *au)
 {
-        if (D.opt == NORM_OPT_NO_ATTRS)
-                return;
+	if (D.opt == NORM_OPT_NO_ATTRS)
+		return;
 
-        auparse_first_record(au);
+	auparse_first_record(au);
 	add_subj_attr(au, "pid", 0); // Just pass 0 since simple is 1 record
 	add_subj_attr(au, "subj", 0);
 }
 
 static void collect_userspace_subj_attr(auparse_state_t *au, int type)
 {
-        if (D.opt == NORM_OPT_NO_ATTRS)
-                return;
+	if (D.opt == NORM_OPT_NO_ATTRS)
+		return;
 
 	// Just pass 0 since simple is 1 record
 	add_subj_attr(au, "hostname", 0);
@@ -2038,8 +2084,8 @@ map:
 		    (strncmp(D.how, "/usr/bin/sh", 11) == 0) ||
 		    (strncmp(D.how, "/usr/bin/bash", 13) == 0) ||
 		    (strncmp(D.how, "/usr/bin/perl", 13) == 0)) {
-                        // comm should be the previous field if its there at all
-                        int fnum;
+			// comm should be the previous field if its there at all
+			int fnum;
 			if ((fnum = auparse_get_field_num(au)) > 0)
 				auparse_goto_field_num(au, fnum - 1);
 			else
@@ -2214,6 +2260,11 @@ int auparse_normalize_object_next_attribute(auparse_state_t *au)
 const char *auparse_normalize_object_kind(const auparse_state_t *au)
 {
 	return normalize_obj_kind_map_i2s(D.thing.what);
+}
+
+int auparse_normalize_object_kind_int(const auparse_state_t *au)
+{
+	return D.thing.what;
 }
 
 int auparse_normalize_get_results(auparse_state_t *au)

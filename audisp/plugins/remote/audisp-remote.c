@@ -32,6 +32,9 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <time.h>
+#ifdef HAVE_MALLINFO2
+#include <malloc.h>
+#endif
 #include <fcntl.h>
 #include <sys/select.h>
 #include <poll.h>
@@ -49,9 +52,9 @@
 #include <cap-ng.h>
 #endif
 #include "libaudit.h"
+#include "auplugin.h"
 #include "private.h"
 #include "remote-config.h"
-#include "common.h"
 #include "queue.h"
 
 #define CONFIG_FILE "/etc/audit/audisp-remote.conf"
@@ -74,12 +77,14 @@ static volatile int remote_ended = 1, quiet = 0;
 static int ifd;
 remote_conf_t config;
 static int warned = 0;
+#ifdef HAVE_MALLINFO2
+static struct mallinfo2 last_mi;
+#endif
+static size_t max_queued_length = 0;
 
 /* Constants */
-static const char *SINGLE = "1";
-static const char *HALT = "0";
-static const char *INIT_PGM = "/sbin/init";
 static const char *SPOOL_FILE = "/var/spool/audit/remote.log";
+#define STATE_FILE AUDIT_RUN_DIR"/remote.state"
 
 /* Local function declarations */
 static int check_message(void);
@@ -120,9 +125,15 @@ gss_ctx_id_t my_context;
 
 /*
  * SIGTERM handler
+ *
+ * Only honor the signal if it comes from the parent process so that other
+ * tasks (cough, systemctl, cough) can't make the plugin exit without
+ * the dispatcher in agreement. Otherwise it will restart the plugin.
  */
-static void term_handler( int sig )
+static void term_handler(int sig, siginfo_t *info, void *ucontext)
 {
+	if (info && info->si_pid != getppid())
+		return;
         stop = 1;
 }
 
@@ -136,27 +147,61 @@ static void hup_handler( int sig )
 
 static void reload_config(void)
 {
-	stop_transport(); // FIXME: We should only stop transport if necessary
+	if (transport_ok)
+		stop_transport();
+	transport_ok = 0;
+	remote_ended = 1;
 	hup = 0;
 }
 
 /*
- * SIGSUR1 handler: dump stats
+ * SIGUSR1 handler: write a state report
  */
 static void user1_handler( int sig )
 {
         dump = 1;
 }
 
-static void dump_stats(struct queue *queue)
+#ifdef HAVE_MALLINFO2
+/* Write glibc memory statistics to FILE */
+static void write_memory_state(FILE *f)
 {
-	syslog(LOG_INFO,
-		"suspend=%s, remote_ended=%s, transport_ok=%s, queued_items=%zu, queue_depth=%u",
-		suspend ? "yes" : "no",
-		remote_ended ? "yes" : "no",
-		transport_ok ? "yes" : "no",
-		q_queue_length(queue),
-		config.queue_depth);
+	struct mallinfo2 mi = mallinfo2();
+
+	fprintf(f, "glibc arena (total memory) is: %zu KiB, was: %zu KiB\n",
+		(size_t)mi.arena/1024, (size_t)last_mi.arena/1024);
+	fprintf(f, "glibc uordblks (in use memory) is: %zu KiB, was: %zu KiB\n",
+		(size_t)mi.uordblks/1024,(size_t)last_mi.uordblks/1024);
+	fprintf(f,"glibc fordblks (total free space) is: %zu KiB, was: %zu KiB\n",
+		(size_t)mi.fordblks/1024,(size_t)last_mi.fordblks/1024);
+
+	memcpy(&last_mi, &mi, sizeof(struct mallinfo2));
+}
+#endif
+
+/* Write plugin state to STATE_FILE */
+static void write_state_report(struct queue *queue)
+{
+        char buf[64];
+        mode_t u = umask(0137); // allow 0640
+        FILE *f = fopen(STATE_FILE, "w");
+        umask(u);
+        if (f == NULL)
+                return;
+
+        time_t now = time(NULL);
+        strftime(buf, sizeof(buf), "%x %X", localtime(&now));
+        fprintf(f, "current_time = %s\n", buf);
+        fprintf(f, "suspend = %s\n", suspend ? "yes" : "no");
+        fprintf(f, "remote_ended = %s\n", remote_ended ? "yes" : "no");
+        fprintf(f, "transport_ok = %s\n", transport_ok ? "yes" : "no");
+        fprintf(f, "queue_length = %zu\n", q_queue_length(queue));
+        fprintf(f, "max_queued_length = %zu\n", max_queued_length);
+        fprintf(f, "queue_depth = %u\n", config.queue_depth);
+#ifdef HAVE_MALLINFO2
+	write_memory_state(f);
+#endif
+	fclose(f);
 	dump = 0;
 }
 
@@ -204,33 +249,11 @@ static int is_pipe(int fd)
 	return 0;
 }
 
-static void change_runlevel(const char *level)
-{
-	char *argv[3];
-	int pid;
-
-	pid = fork();
-	if (pid < 0) {
-		syslog(LOG_ALERT,
-		       "audisp-remote failed to fork switching runlevels");
-		return;
-	}
-	if (pid)	/* Parent */
-		return;
-
-	/* Child */
-	argv[0] = (char *)INIT_PGM;
-	argv[1] = (char *)level;
-	argv[2] = NULL;
-	execve(INIT_PGM, argv, NULL);
-	syslog(LOG_ALERT, "audisp-remote failed to exec %s", INIT_PGM);
-	exit(1);
-}
-
 static void safe_exec(const char *exe, const char *message)
 {
 	char *argv[3];
 	int pid;
+	struct sigaction sa;
 
 	if (exe == NULL) {
 		syslog(LOG_ALERT,
@@ -248,6 +271,15 @@ static void safe_exec(const char *exe, const char *message)
 		return;
 
 	/* Child */
+	sigfillset (&sa.sa_mask);
+	sigprocmask (SIG_UNBLOCK, &sa.sa_mask, 0);
+#ifdef HAVE_CLOSE_RANGE
+	close_range(3, ~0U, 0); /* close all past stderr */
+#else
+	for (int i=3; i<24; i++)     /* Arbitrary number */
+		close(i);
+#endif
+
 	argv[0] = (char *)exe;
 	argv[1] = (char *)message;
 	argv[2] = NULL;
@@ -433,7 +465,9 @@ static struct queue *init_queue(void)
 		path = SPOOL_FILE;
 	q_flags = Q_IN_MEMORY;
 	if (config.mode == M_STORE_AND_FORWARD)
-		/* FIXME: let user control Q_SYNC? */
+		/* FIXME: let user control Q_SYNC? Consider this
+		 * only after something like INCREMENTAL_ASYNC is
+		 * in place. The user can choose between none and async. */
 		q_flags |= Q_IN_FILE | Q_CREAT | Q_RESIZE;
 	verify(QUEUE_ENTRY_SIZE >= MAX_AUDIT_MESSAGE_LENGTH);
 	return q_open(q_flags, path, config.queue_depth, QUEUE_ENTRY_SIZE);
@@ -477,8 +511,6 @@ int main(int argc, char *argv[])
 	sa.sa_flags = 0;
 	sigemptyset(&sa.sa_mask);
 	/* Set handler for the ones we care about */
-	sa.sa_handler = term_handler;
-	sigaction(SIGTERM, &sa, NULL);
 	sa.sa_handler = hup_handler;
 	sigaction(SIGHUP, &sa, NULL);
 	sa.sa_handler = user1_handler;
@@ -487,6 +519,9 @@ int main(int argc, char *argv[])
 	sigaction(SIGUSR2, &sa, NULL);
 	sa.sa_handler = child_handler;
 	sigaction(SIGCHLD, &sa, NULL);
+	sa.sa_sigaction = term_handler;
+	sa.sa_flags = SA_SIGINFO;
+	sigaction(SIGTERM, &sa, NULL);
 	if (load_config(&config, CONFIG_FILE))
 		return 6;
 
@@ -501,6 +536,7 @@ int main(int argc, char *argv[])
 		syslog(LOG_ERR, "Error initializing audit record queue: %m");
 		return 1;
 	}
+	max_queued_length = q_queue_length(queue);
 
 #ifdef HAVE_LIBCAP_NG
 	// Drop capabilities
@@ -514,7 +550,7 @@ int main(int argc, char *argv[])
 	syslog(LOG_NOTICE, "Audisp-remote started with queue_size: %zu",
 		q_queue_length(queue));
 
-	while (stop == 0) { //FIXME break out when socket is closed
+	while (stop == 0) {
 		fd_set rfd, wfd;
 		struct timeval tv;
 		char event[MAX_AUDIT_MESSAGE_LENGTH];
@@ -525,7 +561,7 @@ int main(int argc, char *argv[])
 			reload_config();
 
 		if (dump)
-			dump_stats(queue);
+			write_state_report(queue);
 
 		/* Setup select flags */
 		FD_ZERO(&rfd);
@@ -574,7 +610,7 @@ int main(int argc, char *argv[])
 		// See if input fd is also set
 		if (FD_ISSET(ifd, &rfd)) {
 			do {
-				if (audit_fgets(event,sizeof(event),ifd) > 0) {
+				if (auplugin_fgets(event,sizeof(event),ifd) > 0) {
 					if (!transport_ok && remote_ended &&
 						(config.remote_ending_action ==
 								FA_RECONNECT ||
@@ -611,10 +647,14 @@ int main(int argc, char *argv[])
 							do_overflow_action();
 						else
 							queue_error();
+					} else {
+						size_t len = q_queue_length(queue);
+						if (len > max_queued_length)
+							max_queued_length = len;
 					}
-				} else if (audit_fgets_eof())
+				} else if (auplugin_fgets_eof())
 					stop = 1;
-			} while (audit_fgets_more(sizeof(event)));
+			} while (auplugin_fgets_more(sizeof(event)));
 		}
 		// See if output fd is also set
 		if (sock >= 0 && FD_ISSET(sock, &wfd)) {
@@ -1042,19 +1082,33 @@ static int stop_sock(void)
 	if (sock >= 0) {
 #ifdef USE_GSSAPI
 		if (USE_GSS) {
-			OM_uint32 minor_status;
-			gss_delete_sec_context(&minor_status, &my_context,
-						GSS_C_NO_BUFFER);
-			my_context = GSS_C_NO_CONTEXT;
-			krb5_cc_close(kcontext, ccache);
-			ccache = NULL;
-			krb5_kt_close(kcontext, keytab);
-			keytab = NULL;
-			krb5_free_principal(kcontext, audit_princ);
-			krb5_free_default_realm(kcontext, realm_name);
-			realm_name = NULL;
-			krb5_free_context(kcontext);
-			kcontext = NULL;
+			if (my_context != GSS_C_NO_CONTEXT) {
+				OM_uint32 minor_status;
+				gss_delete_sec_context(&minor_status, &my_context,
+							GSS_C_NO_BUFFER);
+				my_context = GSS_C_NO_CONTEXT;
+			}
+
+			if (kcontext != NULL) {
+				if (ccache != NULL) {
+					krb5_cc_close(kcontext, ccache);
+					ccache = NULL;
+				}
+				if (keytab != NULL) {
+					krb5_kt_close(kcontext, keytab);
+					keytab = NULL;
+				}
+				if (audit_princ != NULL) {
+					krb5_free_principal(kcontext, audit_princ);
+					audit_princ = NULL;
+				}
+				if (realm_name != NULL) {
+					krb5_free_default_realm(kcontext, realm_name);
+					realm_name = NULL;
+				}
+				krb5_free_context(kcontext);
+				kcontext = NULL;
+			}
 		}
 #endif
 		shutdown(sock, SHUT_RDWR);
@@ -1446,10 +1500,12 @@ static int recv_msg_tcp (unsigned char *header, char *msg, uint32_t *mlen)
 	}
 
 	if (! AUDIT_RMW_IS_MAGIC (header, AUDIT_RMW_HEADER_SIZE)) {
-		/* FIXME: the right thing to do here is close the socket
-		 *  and start a new one.  */
+		/* close the socket and start a new one.  */
 		sync_error_handler ("bad magic number");
+		stop_transport();
+		init_transport();
 		return -1;
+
 	}
 
 	AUDIT_RMW_UNPACK_HEADER (header, hver, mver, type, rlen, seq);
@@ -1515,7 +1571,7 @@ static int check_message_ascii(void)
 	char buf[64];
 
 	rc = ar_read(sock, buf, sizeof(buf));
-	if (rc < 0 || remote_ended)
+	if (rc <= 0 || remote_ended)
 		stop = 1;
 
 	return 0;

@@ -20,9 +20,13 @@
  *      Steve Grubb <sgrubb@redhat.com>
  */
 
-#ifndef AUDIT_FGETS_HEADER
-#define AUDIT_FGETS_HEADER
+#ifndef AUDIT_COMMON_HEADER
+#define AUDIT_COMMON_HEADER
 
+#include <limits.h> /* POSIX_HOST_NAME_MAX */
+#ifdef HAVE_ATOMIC
+#include <stdatomic.h>
+#endif
 #include <sys/types.h>
 #include "dso.h"
 // These macros originate in sys/cdefs.h
@@ -38,18 +42,61 @@
 #ifndef __wur
 # define __wur
 #endif
-AUDIT_HIDDEN_START
 
-void audit_fgets_clear(void);
-int audit_fgets_eof(void);
-int audit_fgets_more(size_t blen);
-int audit_fgets(char *buf, size_t blen, int fd)
-	__attr_access ((__write_only__, 1, 2));
+/* Wrapper macros for optional atomics
+ * Note: ATOMIC_INT and ATOMIC_UNSIGNED are defined in config.h */
+#ifdef HAVE_ATOMIC
+#  define AUDIT_ATOMIC_STORE(var, val) \
+   atomic_store_explicit(&(var), (val), memory_order_relaxed)
+#  define AUDIT_ATOMIC_LOAD(var) \
+   atomic_load_explicit(&(var), memory_order_relaxed)
+#else
+#  define AUDIT_ATOMIC_STORE(var, val) do { (var) = (val); } while (0)
+#  define AUDIT_ATOMIC_LOAD(var) (var)
+#endif
+
+// Used in auditd-event.c and audisp.c to size buffers for formatting
+#define FORMAT_BUF_LEN (MAX_AUDIT_MESSAGE_LENGTH + _POSIX_HOST_NAME_MAX)
+
+AUDIT_HIDDEN_START
 
 char *audit_strsplit_r(char *s, char **savedpp);
 char *audit_strsplit(char *s);
 int audit_is_last_record(int type);
 
+extern const char *SINGLE;
+extern const char *HALT;
+void change_runlevel(const char *level);
+const char *get_progname(void);
+
+#define MINUTES 60
+#define HOURS   60*MINUTES
+#define DAYS    24*HOURS
+#define WEEKS   7*DAYS
+#define MONTHS  30*DAYS
+long time_string_to_seconds(const char *time_string,
+			    const char *subsystem, int line);
+
+/* Messages */
+int write_to_console(const char *fmt, ...)
+#ifdef __GNUC__
+	__attribute__((format(printf, 1, 2)));
+#else
+	;
+#endif
+
+void wall_message(const char *fmt, ...)
+#ifdef __GNUC__
+	__attribute__((format(printf, 1, 2)));
+#else
+	;
+#endif
+
+typedef enum { MSG_STDERR, MSG_SYSLOG, MSG_QUIET } message_t;
+typedef enum { DBG_NO, DBG_YES } debug_message_t;
+void _set_aumessage_mode(message_t mode, debug_message_t debug);
+
 AUDIT_HIDDEN_END
+
 #endif
 

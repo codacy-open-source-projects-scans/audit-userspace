@@ -38,8 +38,8 @@
 #include <pthread.h>
 #include <sys/utsname.h>
 #include <getopt.h>
-#ifdef HAVE_ATOMIC
-#include <stdatomic.h>
+#ifdef HAVE_MALLINFO2
+#include <malloc.h>
 #endif
 
 #include "libaudit.h"
@@ -47,6 +47,7 @@
 #include "auditd-config.h"
 #include "auditd-dispatch.h"
 #include "auditd-listen.h"
+#include "common.h"
 #include "libdisp.h"
 #include "private.h"
 
@@ -56,7 +57,10 @@
 #error "LIBEV must not have EV_CHILD_ENABLE set"
 #endif
 
-#define EV_STOP() ev_unloop (ev_default_loop (EVFLAG_AUTO), EVUNLOOP_ALL), stop = 1;
+#define EV_STOP() do {\
+ev_unloop(ev_default_loop(EVFLAG_AUTO), EVUNLOOP_ALL);\
+AUDIT_ATOMIC_STORE(stop, 1);\
+} while (0)
 
 #define DEFAULT_BUF_SZ	448
 #define DMSG_SIZE (DEFAULT_BUF_SZ + 48) 
@@ -65,26 +69,42 @@
 #define SUBJ_LEN 4097
 
 /* Global Data */
+#ifdef HAVE_ATOMIC
+ATOMIC_INT stop = 0;
+#else
 volatile ATOMIC_INT stop = 0;
+#endif
 
 /* Local data */
 static int fd = -1, pipefds[2] = {-1, -1};
 static struct daemon_conf config;
-static const char *pidfile = "/var/run/auditd.pid";
-static const char *state_file = "/var/run/auditd.state";
+static const char *pidfile = AUDIT_RUN_DIR"/auditd.pid";
+static const char *state_file = AUDIT_RUN_DIR"/auditd.state";
 static int init_pipe[2];
 static int do_fork = 1, opt_aggregate_only = 0, config_dir_set = 0;
+/*
+ * Small pool of reusable event structures. The netlink handler needs
+ * one event while processing the current record and a second for
+ * reconfigure work. Keeping them here avoids repeated allocations.
+ */
+struct auditd_event event_pool[2];
 static struct auditd_event *cur_event = NULL, *reconfig_ev = NULL;
 static ATOMIC_INT hup_info_requested = 0;
 static ATOMIC_INT usr1_info_requested = 0, usr2_info_requested = 0;
 static char subj[SUBJ_LEN];
 static uint32_t session;
+static struct ev_timer report_timer_watcher;
+struct ev_loop *loop;
 
 /* Local function prototypes */
 int send_audit_event(int type, const char *str);
 static void clean_exit(void);
 static int get_reply(int fd, struct audit_reply *rep, int seq);
 static char *getsubj(char *subj);
+/* Manage access to the preallocated event pool */
+static struct auditd_event *alloc_pool_event(void);
+int event_is_prealloc(struct auditd_event *e);
+static int make_audit_run_dir(void);
 
 enum startup_state {startup_disable=0, startup_enable, startup_nochange,
 	startup_INVALID};
@@ -93,6 +113,7 @@ static const char *startup_states[] = {"disable", "enable", "nochange"};
 /*
  * Output a usage message
  */
+static void usage(void) __attribute__((noreturn));
 static void usage(void)
 {
 	fprintf(stderr,
@@ -164,7 +185,7 @@ static void user2_handler( struct ev_loop *loop, struct ev_signal *sig, int reve
 }
 
 /*
- * Used with email alerts to cleanup
+ * Used with email alerts and max_log_size_exec to cleanup
  */
 static void child_handler(struct ev_loop *loop, struct ev_signal *sig,
 			int revents)
@@ -174,6 +195,10 @@ static void child_handler(struct ev_loop *loop, struct ev_signal *sig,
 	while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
 		if (pid == dispatcher_pid())
 			dispatcher_reaped();
+		else if (pid == auditd_get_exec_pid()) {
+			resume_logging();
+			auditd_clear_exec_pid();
+		}
 	}
 }
 
@@ -181,6 +206,23 @@ static void child_handler2( int sig )
 {
 	child_handler(NULL, NULL, 0);
 }
+
+#ifdef HAVE_MALLINFO2
+static struct mallinfo2 last_mi;
+static void write_memory_state(FILE *f)
+{
+	struct mallinfo2 mi = mallinfo2();
+
+	fprintf(f, "glibc arena (total memory) is: %zu KiB, was: %zu KiB\n",
+			(size_t)mi.arena/1024, (size_t)last_mi.arena/1024);
+	fprintf(f, "glibc uordblks (in use memory) is: %zu KiB, was: %zu KiB\n",
+			(size_t)mi.uordblks/1024,(size_t)last_mi.uordblks/1024);
+	fprintf(f,"glibc fordblks (total free space) is: %zu KiB, was: %zu KiB\n",
+			(size_t)mi.fordblks/1024,(size_t)last_mi.fordblks/1024);
+
+	memcpy(&last_mi, &mi, sizeof(struct mallinfo2));
+}
+#endif
 
 /*
  * Used to dump internal state information
@@ -195,6 +237,13 @@ static void cont_handler(struct ev_loop *loop, struct ev_signal *sig,
 	if (f == NULL)
 		return;
 
+	int sr_fd = fileno(f);
+	if (sr_fd > 0)
+		if (fchown(sr_fd, 0, config.log_group)) {
+			audit_msg(LOG_INFO,
+			    "fchown on state report failed (%s) continuing",
+			    strerror(errno));
+		}
 	fprintf(f, "audit version = %s\n", VERSION);
 	time_t now = time(0);
 	strftime(buf, sizeof(buf), "%x %X", localtime(&now));
@@ -205,7 +254,30 @@ static void cont_handler(struct ev_loop *loop, struct ev_signal *sig,
 #ifdef USE_LISTENER
 	write_connection_state(f);
 #endif
+#ifdef HAVE_MALLINFO2
+	write_memory_state(f);
+#endif
 	fclose(f);
+}
+
+static void report_timer_cb(struct ev_loop *loop __attribute__((unused)),
+			    struct ev_timer *w __attribute__((unused)),
+			    int revents __attribute__((unused)))
+{
+	raise(SIGCONT);
+}
+
+void update_report_timer(unsigned int interval)
+{
+	if (!loop)
+		return;
+	if (interval == 0)
+		ev_timer_stop(loop, &report_timer_watcher);
+	else {
+		ev_timer_stop(loop, &report_timer_watcher);
+		ev_timer_set(&report_timer_watcher, interval, interval);
+		ev_timer_start(loop, &report_timer_watcher);
+       }
 }
 
 static int extract_type(const char *str)
@@ -329,6 +401,24 @@ int send_audit_event(int type, const char *str)
 		e->reply.len = DMSG_SIZE;
 
 	distribute_event(e);
+	return 0;
+}
+
+
+static int make_audit_run_dir(void)
+{
+	struct stat st;
+
+	if (stat(AUDIT_RUN_DIR, &st) < 0) {
+		if (mkdir(AUDIT_RUN_DIR, 0755) < 0) {
+			audit_msg(LOG_ERR,
+				"Cannot create run directory %s (%s)",
+				AUDIT_RUN_DIR, strerror(errno));
+			return -1;
+		}
+	} else if (!S_ISDIR(st.st_mode))
+		return -1;
+
 	return 0;
 }
 
@@ -475,17 +565,41 @@ static void tell_parent(int status)
 	} while (rc < 0 && errno == EINTR);
 }
 
+/*
+ * alloc_pool_event - return an unused entry from event_pool
+ *
+ * The pool holds two structures so the netlink handler and the
+ * configuration worker can each have one. NULL is returned if both
+ * are already in use.
+ */
+static struct auditd_event *alloc_pool_event(void)
+{
+	if (cur_event != &event_pool[0] && reconfig_ev != &event_pool[0])
+		return &event_pool[0];
+	if (cur_event != &event_pool[1] && reconfig_ev != &event_pool[1])
+		return &event_pool[1];
+	return NULL;
+}
+
+/*
+ * event_is_prealloc - true if 'e' points into event_pool
+ */
+int event_is_prealloc(struct auditd_event *e)
+{
+	return e == &event_pool[0] || e == &event_pool[1];
+}
+
 static void netlink_handler(struct ev_loop *loop, struct ev_io *io,
 			int revents)
 {
 	int rc = 1, cnt = 0;
 
-	// Try to get all the events that are waiting but yield after 5 to
-	// let other handlers run. Five should cover PATH events.
-	// FIXME: backing down to 3 until IPC is faster
-	while (rc > 0 && cnt < 3) {
+	// Try to get all the events that are waiting but yield after 4 to
+	// let other handlers run. Four should cover file watch events.
+	while (rc > 0 && cnt < 4) {
 		if (cur_event == NULL) {
-			if ((cur_event = malloc(sizeof(*cur_event))) == NULL) {
+			cur_event = alloc_pool_event();
+			if (cur_event == NULL) {
 				char emsg[DEFAULT_BUF_SZ];
 				if (*subj)
 					snprintf(emsg, sizeof(emsg),
@@ -597,7 +711,6 @@ static void close_pipes(void)
 	close(pipefds[1]);
 }
 
-struct ev_loop *loop;
 int main(int argc, char *argv[])
 {
 	struct sigaction sa;
@@ -671,10 +784,10 @@ int main(int argc, char *argv[])
 
 	if (opt_foreground) {
 		config.daemonize = D_FOREGROUND;
-		set_aumessage_mode(MSG_STDERR, DBG_YES);
+		_set_aumessage_mode(MSG_STDERR, DBG_YES);
 	} else {
 		config.daemonize = D_BACKGROUND;
-		set_aumessage_mode(MSG_SYSLOG, DBG_NO);
+		_set_aumessage_mode(MSG_SYSLOG, DBG_NO);
 		(void) umask( umask( 077 ) | 022 );
 	}
 	session = audit_get_session();
@@ -747,13 +860,19 @@ int main(int argc, char *argv[])
 			tell_parent(FAILURE);
 			free_config(&config);
 			return 1;
-		} 
+		}
 		openlog("auditd", LOG_PID, LOG_DAEMON);
 	}
 
 	/* Init netlink */
 	if ((fd = audit_open()) < 0) {
-        	audit_msg(LOG_ERR, "Cannot open netlink audit socket");
+		audit_msg(LOG_ERR, "Cannot open netlink audit socket");
+		tell_parent(FAILURE);
+		free_config(&config);
+		return 1;
+	}
+
+	if (make_audit_run_dir() < 0) {
 		tell_parent(FAILURE);
 		free_config(&config);
 		return 1;
@@ -883,7 +1002,7 @@ int main(int argc, char *argv[])
 				"ses=%u res=failed",
 				audit_getloginuid(), getpid(),
 				getuid(), session);
-		stop = 1;
+		AUDIT_ATOMIC_STORE(stop, 1);
 		send_audit_event(AUDIT_DAEMON_ABORT, emsg);
 		audit_msg(LOG_ERR,
 		"Unable to set initial audit startup state to '%s', exiting",
@@ -914,14 +1033,14 @@ int main(int argc, char *argv[])
 				"ses=%u res=failed",
 				audit_getloginuid(), getpid(),
 				getuid(), session);
-		stop = 1;
+		AUDIT_ATOMIC_STORE(stop, 1);
 		send_audit_event(AUDIT_DAEMON_ABORT, emsg);
 		audit_msg(LOG_ERR, "Unable to set audit pid, exiting");
+		tell_parent(FAILURE);
 		shutdown_events();
 		if (pidfile)
 			unlink(pidfile);
 		shutdown_dispatcher();
-		tell_parent(FAILURE);
 		close_pipes();
 		free_config(&config);
 		ev_default_destroy();
@@ -955,6 +1074,11 @@ int main(int argc, char *argv[])
 	ev_io_init (&pipe_watcher, pipe_handler, pipefds[0], EV_READ);
 	ev_io_start (loop, &pipe_watcher);
 
+	ev_timer_init(&report_timer_watcher, report_timer_cb, 0., 0.);
+
+	if (config.report_interval)
+		update_report_timer(config.report_interval);
+
 	if (auditd_tcp_listen_init(loop, &config)) {
 		char emsg[DEFAULT_BUF_SZ];
 		if (*subj)
@@ -969,13 +1093,13 @@ int main(int argc, char *argv[])
 				"ses=%u res=failed",
 				audit_getloginuid(), getpid(),
 				getuid(), session);
-		stop = 1;
+		AUDIT_ATOMIC_STORE(stop, 1);
 		send_audit_event(AUDIT_DAEMON_ABORT, emsg);
 		tell_parent(FAILURE);
 	} else {
 		/* Now tell parent that everything went OK */
 		tell_parent(SUCCESS);
-		audit_msg(LOG_NOTICE,
+		audit_msg(LOG_INFO,
 	    "Init complete, auditd %s listening for events (startup state %s)",
 			VERSION,
 			startup_states[opt_startup]);
@@ -986,7 +1110,7 @@ int main(int argc, char *argv[])
 		close(init_pipe[1]);
 
 	// Init complete, start event loop
-	if (!stop)
+	if (!AUDIT_ATOMIC_LOAD(stop))
 		ev_loop (loop, 0);
 
 	// Event loop finished, clean up everything
@@ -998,6 +1122,7 @@ int main(int argc, char *argv[])
 	ev_signal_stop (loop, &sigusr2_watcher);
 	ev_signal_stop (loop, &sigterm_watcher);
 	ev_signal_stop (loop, &sigcont_watcher);
+	ev_timer_stop  (loop, &report_timer_watcher);
 
 	/* Write message to log that we are going down */
 	rc = audit_request_signal_info(fd);
@@ -1013,9 +1138,8 @@ int main(int argc, char *argv[])
 		} 
 	} 
 	if (rc <= 0)
-		send_audit_event(AUDIT_DAEMON_END, 
+		send_audit_event(AUDIT_DAEMON_END,
 		"op=terminate auid=-1 uid=-1 ses=-1 pid=-1 subj=? res=success");
-	free(cur_event);
 
 	// Tear down IO watchers Part 2
 	if (!opt_aggregate_only)

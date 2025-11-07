@@ -33,12 +33,8 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/vfs.h>
-#include <limits.h>     /* POSIX_HOST_NAME_MAX */
 #include <ctype.h>	/* toupper */
 #include <libgen.h>	/* dirname */
-#ifdef HAVE_ATOMIC
-#include <stdatomic.h>
-#endif
 #include "auditd-event.h"
 #include "auditd-dispatch.h"
 #include "auditd-listen.h"
@@ -46,9 +42,21 @@
 #include "private.h"
 #include "auparse.h"
 #include "auparse-idata.h"
+#include "common.h"
 
 /* This is defined in auditd.c */
+#ifdef HAVE_ATOMIC
+extern ATOMIC_INT stop;
+#else
 extern volatile ATOMIC_INT stop;
+#endif
+
+extern void update_report_timer(unsigned int interval);
+/*
+ * This function is provided by auditd.c and marked weak so test utilities
+ * that don't link auditd.c can still link this file.
+ */
+extern int event_is_prealloc(struct auditd_event *e) __attribute__((weak));
 
 /* Local function prototypes */
 static void send_ack(const struct auditd_event *e, int ack_type,
@@ -65,11 +73,9 @@ static void rotate_logs_now(void);
 static void rotate_logs(unsigned int num_logs, unsigned int keep_logs);
 static void shift_logs(void);
 static int  open_audit_log(void);
-static void change_runlevel(const char *level);
-static void safe_exec(const char *exe);
+static pid_t safe_exec(const char *exe);
 static void reconfigure(struct auditd_event *e);
 static void init_flush_thread(void);
-
 
 /* Local Data */
 static struct daemon_conf *config;
@@ -81,8 +87,7 @@ static int fs_admin_space_warning = 0;
 static int fs_space_left = 1;
 static int logging_suspended = 0;
 static unsigned int known_logs = 0;
-static const char *SINGLE = "1";
-static const char *HALT = "0";
+static pid_t exec_child_pid = -1;
 static char *format_buf = NULL;
 static off_t log_size = 0;
 static pthread_t flush_thread;
@@ -92,7 +97,6 @@ static volatile int flush;
 static auparse_state_t *au = NULL;
 
 /* Local definitions */
-#define FORMAT_BUF_LEN (MAX_AUDIT_MESSAGE_LENGTH + _POSIX_HOST_NAME_MAX)
 #define MIN_SPACE_LEFT 24
 
 static inline int from_network(const struct auditd_event *e)
@@ -103,6 +107,16 @@ int dispatch_network_events(void)
 	return config->distribute_network_events;
 }
 
+pid_t auditd_get_exec_pid(void)
+{
+       return exec_child_pid;
+}
+
+void auditd_clear_exec_pid(void)
+{
+       exec_child_pid = -1;
+}
+
 void write_logging_state(FILE *f)
 {
 	fprintf(f, "writing to logs = %s\n", config->write_logs ? "yes" : "no");
@@ -110,21 +124,21 @@ void write_logging_state(FILE *f)
 		int rc;
 		struct statfs buf;
 
-		fprintf(f, "current log size = %llu KB\n",
+		fprintf(f, "current log size = %llu KiB\n",
 			(long long unsigned)log_size/1024);
-		fprintf(f, "max log size = %lu KB\n",
+		fprintf(f, "max log size = %lu KiB\n",
 				config->max_log_size * (MEGABYTE/1024));
 		fprintf(f,"logs detected last rotate/shift = %u\n", known_logs);
 		fprintf(f, "space left on partition = %s\n",
 					fs_space_left ? "yes" : "no");
 		rc = fstatfs(log_fd, &buf);
 		if (rc == 0) {
-			fprintf(f, "Logging partition free space = %llu MB\n",
+			fprintf(f, "Logging partition free space = %llu MiB\n",
 				(long long unsigned)
 				(buf.f_bavail * buf.f_bsize)/MEGABYTE);
-			fprintf(f, "space_left setting = %lu MB\n",
+			fprintf(f, "space_left setting = %lu MiB\n",
 				config->space_left);
-			fprintf(f, "admin_space_left setting = %lu MB\n",
+			fprintf(f, "admin_space_left setting = %lu MiB\n",
 				config->admin_space_left);
 		}
 		fprintf(f, "logging suspended = %s\n",
@@ -178,7 +192,15 @@ int init_event(struct daemon_conf *conf)
 	if (config->daemonize == D_BACKGROUND) {
 		check_log_file_size();
 		check_excess_logs();
-		check_space_left();
+		/* At this stage, auditd is not fully initialized and operational.
+		 This means we can't notify the parent process that initialization
+		 is complete. However, if space_left_action is set to SINGLE, we must
+		 avoid switching to that runlevel. Before entering the SINGLE
+		 runlevel requires auditd to finish initialization. But auditd will not
+		 start properly or signal the init system that it has started, as it is
+		 blocked by the attempt to switch to single-user mode, resulting in a
+		 deadlock. */
+		// check_space_left();
 	}
 	format_buf = (char *)malloc(FORMAT_BUF_LEN);
 	if (format_buf == NULL) {
@@ -208,7 +230,7 @@ static void *flush_thread_main(void *arg)
 	sigaddset(&sigs, SIGCONT);
 	pthread_sigmask(SIG_SETMASK, &sigs, NULL);
 
-	while (!stop) {
+	while (!AUDIT_ATOMIC_LOAD(stop)) {
 		pthread_mutex_lock(&flush_lock);
 
 		// In the event that the logging thread requests another
@@ -216,7 +238,7 @@ static void *flush_thread_main(void *arg)
 		// into a loop of fsyncs.
 		while (flush == 0) {
 			pthread_cond_wait(&do_flush, &flush_lock);
-			if (stop) {
+			if (AUDIT_ATOMIC_LOAD(stop)) {
 				pthread_mutex_unlock(&flush_lock);
 				return NULL;
 			}
@@ -246,6 +268,9 @@ static void replace_event_msg(struct auditd_event *e, const char *buf)
 	if (buf) {
 		size_t len = strlen(buf);
 
+		if (e->reply.message != e->reply.msg.data)
+			free((void *)e->reply.message);
+
 		if (len < MAX_AUDIT_MESSAGE_LENGTH - 1)
 			e->reply.message = strdup(buf);
 		else {
@@ -263,23 +288,30 @@ static void replace_event_msg(struct auditd_event *e, const char *buf)
 
 /*
 * This function will take an audit structure and return a
-* text buffer that's formatted for writing to disk. If there
-* is an error the return value is NULL.
+* text buffer that's formatted for writing to disk. If there is
+* an error the return value is 0 and the format_buf is truncated.
+* format_buf will have any '\n' removed on return.
 */
-static const char *format_raw(const struct audit_reply *rep)
+static int format_raw(const struct audit_reply *rep)
 {
-        char *ptr;
+	char *ptr;
+	int nlen;
 
-        if (rep == NULL) {
+	format_buf[0] = 0;
+
+	if (rep == NULL) {
 		if (config->node_name_format != N_NONE)
-			snprintf(format_buf, FORMAT_BUF_LEN - 32,
+			nlen = snprintf(format_buf, FORMAT_BUF_LEN - 32,
 		"node=%s type=DAEMON_ERR op=format-raw msg=NULL res=failed",
                                 config->node_name);
 		else
-			snprintf(format_buf, MAX_AUDIT_MESSAGE_LENGTH,
+			nlen = snprintf(format_buf, MAX_AUDIT_MESSAGE_LENGTH,
 			  "type=DAEMON_ERR op=format-raw msg=NULL res=failed");
+
+		if (nlen < 1)
+			return 0;
 	} else {
-		int len, nlen;
+		int len;
 		const char *type, *message;
 		char unknown[32];
 		type = audit_msg_type_to_name(rep->type);
@@ -300,23 +332,31 @@ static const char *format_raw(const struct audit_reply *rep)
 		// MAX_AUDIT_MESSAGE_LENGTH is too small
 		if (config->node_name_format != N_NONE)
 			nlen = snprintf(format_buf, FORMAT_BUF_LEN - 32,
-				"node=%s type=%s msg=%.*s\n",
+				"node=%s type=%s msg=%.*s",
                                 config->node_name, type, len, message);
 		else
 		        nlen = snprintf(format_buf,
 				MAX_AUDIT_MESSAGE_LENGTH - 32,
 				"type=%s msg=%.*s", type, len, message);
 
+		if (nlen < 1)
+			return 0;
+
 	        /* Replace \n with space so it looks nicer. */
 		ptr = format_buf;
-	        while ((ptr = strchr(ptr, 0x0A)) != NULL)
-		        *ptr = ' ';
+	        while (*ptr) {
+			if (*ptr == '\n')
+			        *ptr = ' ';
+			ptr++;
+		}
 
 		/* Trim trailing space off since it wastes space */
-		if (format_buf[nlen-1] == ' ')
+		if (format_buf[nlen-1] == ' ') {
 			format_buf[nlen-1] = 0;
+			nlen--;
+		}
 	}
-        return format_buf;
+        return nlen;
 }
 
 static int sep_done = 0;
@@ -363,7 +403,8 @@ static int add_simple_field(auparse_state_t *au, size_t len_left, int encode)
 		enc = audit_encode_nv_string(field_name, value, vlen);
 		if (enc == NULL)
 			return 0;
-		tlen = 1 + strlen(enc) + 1;
+		vlen = strlen(enc);
+		tlen = 1 + vlen + 1;
 	} else
 		// calculate length to use
 		tlen = 1 + nlen + 1 + vlen + 1;
@@ -384,19 +425,28 @@ static int add_simple_field(auparse_state_t *au, size_t len_left, int encode)
 		num = 0;
 
 	// Add the field
-	if (encode) {
-		num += snprintf(ptr, tlen, "%s", enc);
+	if (encode) {	// encoded: "%s"
+		memcpy(ptr, enc, vlen);
+		ptr[vlen] = 0;
+		num += vlen;
 		free(enc);
-	} else
-		num += snprintf(ptr, tlen, "%s=%s", field_name, value);
-
+	} else {	// plain: "%s=%s"
+		memcpy(ptr, field_name, nlen);
+		ptr += nlen;
+		*ptr++ = '=';
+		memcpy(ptr, value, vlen);
+		ptr[vlen] = 0;
+		num += nlen + 1 + vlen;
+	}
 	return num;
 }
 
 /*
-* This function will take an audit structure and return a
-* text buffer that's formatted and enriched. If there is an
-* error the return value is NULL.
+* This function will take an audit structure and return a text
+* buffer that's formatted and enriched. If there is an error the
+* return value is the raw formatted buffer (which may be truncated if it
+* had an error)or an error message in the format_buffer. The return
+* value is never NULL.
 */
 static const char *format_enrich(const struct audit_reply *rep)
 {
@@ -411,43 +461,46 @@ static const char *format_enrich(const struct audit_reply *rep)
 	} else {
 		int rc, rtype;
 		size_t mlen, len;
-		char *message;
+
 		// Do raw format to get event started
-		format_raw(rep);
+		mlen = format_raw(rep);
 
 		// How much room is left?
-		mlen = strlen(format_buf);
 		len = FORMAT_BUF_LEN - mlen;
 		if (len <= MIN_SPACE_LEFT)
 			return format_buf;
 
-		// create copy to parse up
+		// Add carriage return so auparse sees it correctly
 		format_buf[mlen] = 0x0A;
 		format_buf[mlen+1] = 0;
-		message = strdup(format_buf);
-		format_buf[mlen] = 0;
+		mlen++;	// Increase the length so auparse copies the '\n'
 
 		// init auparse
 		if (au == NULL) {
-			au = auparse_init(AUSOURCE_BUFFER, message);
+			au = auparse_init(AUSOURCE_BUFFER, format_buf);
 			if (au == NULL) {
-				free(message);
+				format_buf[mlen-1] = 0; //remove newline
 				return format_buf;
 			}
+
 			auparse_set_escape_mode(au, AUPARSE_ESC_RAW);
 			auparse_set_eoe_timeout(config->end_of_event_timeout);
 		} else
-			auparse_new_buffer(au, message, mlen+1);
+			auparse_new_buffer(au, format_buf, mlen);
+
 		sep_done = 0;
 
 		// Loop over all fields while possible to add field
 		rc = auparse_first_record(au);
+		if (rc != 1)
+			format_buf[mlen-1] = 0; //remove newline on failure
+
 		rtype = auparse_get_type(au);
 		switch (rtype)
 		{	// Flush before adding to pickup new associations
 			case AUDIT_ADD_USER:
 			case AUDIT_ADD_GROUP:
-				_auparse_flush_caches();
+				_auparse_flush_caches(au);
 				break;
 			default:
 				break;
@@ -478,6 +531,9 @@ static const char *format_enrich(const struct audit_reply *rep)
 					break;
 			}
 			rc = auparse_next_field(au);
+			//remove newline when nothing added
+			if (rc < 1 && sep_done == 0)
+				format_buf[mlen-1] = 0;
 		}
 
 		switch(rtype)
@@ -486,13 +542,13 @@ static const char *format_enrich(const struct audit_reply *rep)
 			case AUDIT_DEL_USER:
 			case AUDIT_DEL_GROUP:
 			case AUDIT_GRP_MGMT:
-				_auparse_flush_caches();
+				_auparse_flush_caches(au);
 				break;
 			default:
 				break;
 		}
-		free(message);
 	}
+
         return format_buf;
 }
 
@@ -503,7 +559,8 @@ void format_event(struct auditd_event *e)
 	switch (config->log_format)
 	{
 		case LF_RAW:
-			buf = format_raw(&e->reply);
+			format_raw(&e->reply);
+			buf = format_buf;
 			break;
 		case LF_ENRICHED:
 			buf = format_enrich(&e->reply);
@@ -523,7 +580,8 @@ void cleanup_event(struct auditd_event *e)
 	// into the middle of the reply allocation. Check for it.
 	if (e->reply.message != e->reply.msg.data)
 		free((void *)e->reply.message);
-	free(e);
+	if (!event_is_prealloc || !event_is_prealloc(e))
+		free(e);
 }
 
 /* This function takes a  reconfig event and sends it to the handler */
@@ -730,6 +788,15 @@ static void check_log_file_size(void)
 				audit_msg(LOG_ERR,
 			    "Audit daemon log file is larger than max size");
 				break;
+			case SZ_EXEC:
+				if (log_file)
+					fclose(log_file);
+				log_file = NULL;
+				log_fd = -1;
+				logging_suspended = 1;
+				exec_child_pid =
+					safe_exec(config->max_log_file_exe);
+				break;
 			case SZ_SUSPEND:
 				audit_msg(LOG_ERR,
 		    "Audit daemon is suspending logging due to logfile size.");
@@ -745,13 +812,13 @@ static void check_log_file_size(void)
 				break;
 			case SZ_ROTATE:
 				if (config->num_logs > 1) {
-					audit_msg(LOG_NOTICE,
+					audit_msg(LOG_INFO,
 					    "Audit daemon rotating log files");
 					rotate_logs(0, 0);
 				}
 				break;
 			case SZ_KEEP_LOGS:
-				audit_msg(LOG_NOTICE,
+				audit_msg(LOG_INFO,
 			    "Audit daemon rotating log files with keep option");
 					shift_logs();
 				break;
@@ -819,11 +886,35 @@ extern int sendmail(const char *subject, const char *content,
 static void do_space_left_action(int admin)
 {
 	int action;
+	char buffer[256];
+	const char *next_actions;
 
-	if (admin)
+	// Select the appropriate action and generate a meaningful message
+	// explaining what happens if disk space reaches a threshold or
+	// becomes completely full.
+	if (admin) {
 		action = config->admin_space_left_action;
-	else
+
+		snprintf(buffer, sizeof(buffer),
+			"If the disk becomes full, audit will %s.",  failure_action_to_str(config->disk_full_action));
+	}
+	else {
 		action = config->space_left_action;
+
+		snprintf(buffer, sizeof(buffer),
+			"If the admin space left threshold is reached, audit will %s. "
+			"If the disk becomes full, audit will %s.",
+			failure_action_to_str(config->admin_space_left_action),
+			failure_action_to_str(config->disk_full_action));
+	}
+	next_actions = buffer;
+
+	// If space_left is reached and FA_HALT is set in any of these fields
+	// we need to inform logged in users.
+	if (config->admin_space_left_action == FA_HALT ||
+		config->disk_full_action == FA_HALT) {
+		wall_message("The audit system is low on disk space and is now halting the system for admin corrective action.");
+	}
 
 	switch (action)
 	{
@@ -831,30 +922,37 @@ static void do_space_left_action(int admin)
 			break;
 		case FA_SYSLOG:
 			audit_msg(LOG_ALERT,
-			    "Audit daemon is low on disk space for logging");
+				"Audit daemon is low on disk space for logging. %s", next_actions);
 			break;
 		case FA_ROTATE:
 			if (config->num_logs > 1) {
-				audit_msg(LOG_NOTICE,
+				audit_msg(LOG_INFO,
 					"Audit daemon rotating log files");
 				rotate_logs(0, 0);
 			}
 			break;
 		case FA_EMAIL:
+		{
+			char content[512];
+			const char *subject;
+
 			if (admin == 0) {
-				sendmail("Audit Disk Space Alert",
-				"The audit daemon is low on disk space for logging! Please take action\nto ensure no loss of service.",
-					config->action_mail_acct);
-				audit_msg(LOG_ALERT,
-			    "Audit daemon is low on disk space for logging");
+				subject = "Audit Disk Space Alert";
+				snprintf(content, sizeof(content),
+					"The audit daemon is low on disk space for logging! Please take action\n"
+					"to ensure no loss of service.\n"
+					"%s", next_actions);
 			} else {
-				sendmail("Audit Admin Space Alert",
-				"The audit daemon is very low on disk space for logging! Immediate action\nis required to ensure no loss of service.",
-					config->action_mail_acct);
-				audit_msg(LOG_ALERT,
-			  "Audit daemon is very low on disk space for logging");
+				subject = "Audit Admin Space Alert";
+				snprintf(content, sizeof(content),
+					"The audit daemon is very low on disk space for logging! Immediate action\n"
+					"is required to ensure no loss of service.\n"
+					"%s", next_actions);
 			}
+			sendmail(subject, content, config->action_mail_acct);
+			audit_msg(LOG_ALERT, "%s", content);
 			break;
+		}
 		case FA_EXEC:
 			// Close the logging file in case the script zips or
 			// moves the file. We'll reopen in sigusr2 handler
@@ -884,13 +982,14 @@ static void do_space_left_action(int admin)
 			audit_msg(LOG_ALERT,
 				"The audit daemon is now changing the system to single user mode and exiting due to low disk space");
 			change_runlevel(SINGLE);
-			stop = 1;
+			AUDIT_ATOMIC_STORE(stop, 1);
 			break;
 		case FA_HALT:
+			// Only available for admin
 			audit_msg(LOG_ALERT,
 				"The audit daemon is now halting the system and exiting due to low disk space");
 			change_runlevel(HALT);
-			stop = 1;
+			AUDIT_ATOMIC_STORE(stop, 1);
 			break;
 		default:
 			audit_msg(LOG_ALERT,
@@ -910,7 +1009,7 @@ static void do_disk_full_action(void)
 			break;
 		case FA_ROTATE:
 			if (config->num_logs > 1) {
-				audit_msg(LOG_NOTICE,
+				audit_msg(LOG_INFO,
 					"Audit daemon rotating log files");
 				rotate_logs(0, 0);
 			}
@@ -941,13 +1040,13 @@ static void do_disk_full_action(void)
 			audit_msg(LOG_ALERT,
 				"The audit daemon is now changing the system to single user mode and exiting due to no space left on logging partition");
 			change_runlevel(SINGLE);
-			stop = 1;
+			AUDIT_ATOMIC_STORE(stop, 1);
 			break;
 		case FA_HALT:
 			audit_msg(LOG_ALERT,
 				"The audit daemon is now halting the system and exiting due to no space left on logging partition");
 			change_runlevel(HALT);
-			stop = 1;
+			AUDIT_ATOMIC_STORE(stop, 1);
 			break;
 		default:
 			audit_msg(LOG_ALERT, "Unknown disk full action requested");
@@ -998,13 +1097,13 @@ static void do_disk_error_action(const char *func, int err)
 			audit_msg(LOG_ALERT,
 				"The audit daemon is now changing the system to single user mode and exiting due to previously mentioned write error");
 			change_runlevel(SINGLE);
-			stop = 1;
+			AUDIT_ATOMIC_STORE(stop, 1);
 			break;
 		case FA_HALT:
 			audit_msg(LOG_ALERT,
 				"The audit daemon is now halting the system and exiting due to previously mentioned write error.");
 			change_runlevel(HALT);
-			stop = 1;
+			AUDIT_ATOMIC_STORE(stop, 1);
 			break;
 		default:
 			audit_msg(LOG_ALERT,
@@ -1344,62 +1443,47 @@ retry:
 	return 0;
 }
 
-static void change_runlevel(const char *level)
-{
-	char *argv[3];
-	int pid;
-	struct sigaction sa;
-	static const char *init_pgm = "/sbin/init";
-
-	pid = fork();
-	if (pid < 0) {
-		audit_msg(LOG_ALERT,
-			"Audit daemon failed to fork switching runlevels");
-		return;
-	}
-	if (pid)	/* Parent */
-		return;
-	/* Child */
-	sigfillset (&sa.sa_mask);
-	sigprocmask (SIG_UNBLOCK, &sa.sa_mask, 0);
-
-	argv[0] = (char *)init_pgm;
-	argv[1] = (char *)level;
-	argv[2] = NULL;
-	execve(init_pgm, argv, NULL);
-	audit_msg(LOG_ALERT, "Audit daemon failed to exec %s", init_pgm);
-	exit(1);
-}
-
-static void safe_exec(const char *exe)
+/*
+ * This function executes a new process. It returns -1 on failure to fork.
+ * It returns a positive number to the parent. This positive number is the
+ * pid of the child. If the child fails to exec the new process, it exits
+ * with a 1. The exit code can be picked up in the sigchld handler.
+ */
+static pid_t safe_exec(const char *exe)
 {
 	char *argv[2];
-	int pid;
+	pid_t pid;
 	struct sigaction sa;
 
 	if (exe == NULL) {
 		audit_msg(LOG_ALERT,
 			"Safe_exec passed NULL for program to execute");
-		return;
+		return -1;
 	}
 
 	pid = fork();
 	if (pid < 0) {
 		audit_msg(LOG_ALERT,
 			"Audit daemon failed to fork doing safe_exec");
-		return;
+		return -1;
 	}
-	if (pid)	/* Parent */
-		return;
+	if (pid) /* Parent */
+	return pid;
 	/* Child */
-        sigfillset (&sa.sa_mask);
-        sigprocmask (SIG_UNBLOCK, &sa.sa_mask, 0);
+	sigfillset(&sa.sa_mask);
+	sigprocmask(SIG_UNBLOCK, &sa.sa_mask, 0);
+#ifdef HAVE_CLOSE_RANGE
+	close_range(3, ~0U, 0); /* close all past stderr */
+#else
+	for (int i=3; i<24; i++)     /* Arbitrary number */
+		close(i);
+#endif
 
 	argv[0] = (char *)exe;
 	argv[1] = NULL;
 	execve(exe, argv, NULL);
 	audit_msg(LOG_ALERT, "Audit daemon failed to exec %s", exe);
-	exit(1);
+	_exit(EXIT_FAILURE); // Avoid running the atexit handlers
 }
 
 static void reconfigure(struct auditd_event *e)
@@ -1490,11 +1574,29 @@ static void reconfigure(struct auditd_event *e)
 	oconf->q_depth = nconf->q_depth;
 	oconf->overflow_action = nconf->overflow_action;
 	oconf->max_restarts = nconf->max_restarts;
-	if (oconf->plugin_dir != nconf->plugin_dir ||
-		(oconf->plugin_dir && nconf->plugin_dir &&
-		strcmp(oconf->plugin_dir, nconf->plugin_dir) != 0)) {
+	if (nconf->plugin_dir) {
+		if (!oconf->plugin_dir ||
+				strcmp(oconf->plugin_dir,
+					nconf->plugin_dir) != 0) {
+			char *tmp = strdup(nconf->plugin_dir);
+
+			if (tmp == NULL)
+				audit_msg(LOG_ERR,
+				"Cannot duplicate plugin_dir in reconfigure");
+			else {
+				free(oconf->plugin_dir);
+				oconf->plugin_dir = tmp;
+			}
+		}
+	} else if (oconf->plugin_dir) {
 		free(oconf->plugin_dir);
-		oconf->plugin_dir = nconf->plugin_dir;
+		oconf->plugin_dir = NULL;
+	}
+	if (nconf->plugin_dir == oconf->plugin_dir)
+		nconf->plugin_dir = NULL;
+	else {
+		free(nconf->plugin_dir);
+		nconf->plugin_dir = NULL;
 	}
 
 	/* At this point we will work on the items that are related to
@@ -1510,6 +1612,19 @@ static void reconfigure(struct auditd_event *e)
 	if (oconf->max_log_size != nconf->max_log_size) {
 		oconf->max_log_size = nconf->max_log_size;
 		need_size_check = 1;
+	}
+
+	// max log exe
+	if (oconf->max_log_file_exe || nconf->max_log_file_exe) {
+		if (nconf->max_log_file_exe == NULL)
+                       ;
+		else if (oconf->max_log_file_exe == NULL && nconf->max_log_file_exe)
+			need_size_check = 1;
+		else if (strcmp(oconf->max_log_file_exe,
+				nconf->max_log_file_exe))
+			need_size_check = 1;
+		free((char *)oconf->max_log_file_exe);
+		oconf->max_log_file_exe = nconf->max_log_file_exe;
 	}
 
 	if (need_size_check) {
@@ -1631,6 +1746,12 @@ static void reconfigure(struct auditd_event *e)
 			need_space_check = 1;
 		free((char *)oconf->disk_full_exe);
 		oconf->disk_full_exe = nconf->disk_full_exe;
+	}
+
+	// report interval
+	if (oconf->report_interval != nconf->report_interval) {
+		oconf->report_interval = nconf->report_interval;
+		update_report_timer(oconf->report_interval);
 	}
 
 	if (need_space_check) {

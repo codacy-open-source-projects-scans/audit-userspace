@@ -44,6 +44,7 @@ audit_syscall_to_name.3 audit_name_to_errno.3\
 audit_fstype_to_name.3 audit_name_to_fstype.3 \
 audit_name_to_action.3 \
 audit_flag_to_name.3 audit_name_to_flag.3 \
+auplugin_fgets.3 auplugin.3 \
 auparse_destroy.3 auparse_feed.3 auparse_feed_age_events.3 \
 auparse_feed_has_data.3 auparse_find_field.3 \
 auparse_find_field_next.3 auparse_first_field.3 auparse_first_record.3 \
@@ -65,8 +66,12 @@ aureport.8 ausearch.8 ausearch_add_item.3 ausearch_add_interpreted_item.3 \
 ausearch_add_expression.3 ausearch_add_timestamp_item.3 ausearch_add_regex.3 \
 ausearch_add_timestamp_item_ex.3 ausearch_clear.3 \
 ausearch_next_event.3 ausearch_cur_event.3 ausearch_set_stop.3 \
-get_auditfail_action.3 set_aumessage_mode.3 \
+get_auditfail_action.3 \
 audispd-zos-remote.8 libaudit.conf.5 \
 augenrules.8 audit_set_backlog_wait_time.3 \
-zos-remote.conf.5
+audit_can_read.3 audit_get_features.3 audit_request_features.3 \
+audit_reset_backlog_wait_time_actual.3 audit_reset_lost.3 \
+audit_set_feature.3 audit_set_loginuid_immutable.3 \
+zos-remote.conf.5 \
+auditd.cron.5
 

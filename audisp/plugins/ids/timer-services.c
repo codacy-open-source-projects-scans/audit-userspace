@@ -25,6 +25,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>	// for snprintf
+#include <stdlib.h>	// for free
 #include "timer-services.h"
 #include "nvpair.h"
 #include "reactions.h"
@@ -44,8 +45,17 @@ void init_timer_services(void)
 
 void do_timer_services(unsigned int interval)
 {
+	// Process any pending signal actions
+	if (dump_state)
+		output_state();
+	if (hup)
+		reload_config();
+
 	now += interval;
-rerun_jobs:
+
+	if (labs(time(NULL) - now) > (time_t)interval)
+		now = time(NULL);
+
 	while (nvpair_list_find_job(&jobs, now)) {
 		nvnode *j = nvpair_list_get_cur(&jobs);
 		switch (j->job) {
@@ -55,7 +65,7 @@ rerun_jobs:
 				break;
 			case UNBLOCK_ADDRESS:
 				{
-				// Send iptables rule
+				// Send firewall rule
 				int res = unblock_ip_address(j->arg);
 
 				// Log that its back in business
@@ -75,28 +85,26 @@ rerun_jobs:
 		}
 		nvpair_list_delete_cur(&jobs);
 	}
-
-	// Every 10 minutes resync to the clock
-	if (now%600 > interval) {
-		time_t cur = now;
-		now = time(NULL);
-		if (now > cur) {
-			if (debug)
-			    my_printf("Time jumped - rerunning jobs");
-			goto rerun_jobs;
-		}
-	}
 }
 
-void add_timer_job(jobs_t job, const char *arg, unsigned long length)
+int add_timer_job(jobs_t job, const char *arg, unsigned long length)
 {
 	nvnode node;
 
 	node.job = job;
-	node.arg = strdup(arg);
 	node.expiration = time(NULL) + length;
+	node.arg = strdup(arg);
+	if (node.arg == NULL) {
+		if (debug)
+		    my_printf("timer-services: strdup failed adding job");
+		return 1;
+	}
 
-	nvpair_list_append(&jobs, &node);
+	if (nvpair_list_append(&jobs, &node)) {
+		free(node.arg);
+		return 1;
+	}
+	return 0;
 }
 
 void shutdown_timer_services(void)

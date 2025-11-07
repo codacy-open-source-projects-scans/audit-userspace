@@ -34,12 +34,14 @@
 #include <netdb.h>
 #include <limits.h>	/* PATH_MAX */
 #include <ctype.h>
+#include <unistd.h>
 #include "libaudit.h"
 #include "ausearch-options.h"
 #include "ausearch-lookup.h"
 #include "ausearch-parse.h"
 #include "auparse-idata.h"
 #include "ausearch-nvpair.h"
+
 
 #define NAME_OFFSET 28
 static const char key_sep[2] = { AUDIT_KEY_SEPARATOR, 0 };
@@ -78,7 +80,9 @@ static int audit_avc_init(search_items *s)
 }
 
 /*
- * This function will take the list and extract the searchable fields from it.
+ * This function will take the audit event as a list and extract the
+ * searchable fields from it. It does this by iterating over each record
+ * in the event and branching to the right parser for each record type.
  * It returns 0 on success and 1 on failure.
  */
 int extract_search_items(llist *l)
@@ -209,10 +213,20 @@ int extract_search_items(llist *l)
  */
 static nvlist uid_nvl;
 static int uid_list_created=0;
+static int interp_init = 0;
+static auparse_state_t *au = NULL;
 static const char *lookup_uid(const char *field, uid_t uid)
 {
 	const char *value;
-	value = _auparse_lookup_interpretation(field);
+
+	if (!interp_init) {
+		au = auparse_init(AUSOURCE_BUFFER, "");
+		if (au == NULL)
+			return NULL;
+		interp_init = 1;
+	}
+
+	value = _auparse_lookup_interpretation(au, field);
 	if (value)
 		return value;
 	if (uid == 0)
@@ -676,7 +690,9 @@ static int parse_dir(const lnode *n, search_items *s)
 	char *str, *term;
 
 	if (event_filename) {
-	// dont do this search unless needed
+		// dont do this search unless needed
+		if (strlen(n->message) < 34)
+		    return 0;
 		str = strstr(n->message+NAME_OFFSET, " cwd=");
 		if (str) {
 			str += 5;
@@ -808,8 +824,10 @@ static int parse_path(const lnode *n, search_items *s)
 	// anything before that. Its only time and type.
 	char *str, *term = n->message+NAME_OFFSET;
 
+	// dont do this search unless needed
+	if (strlen(n->message) < 35)
+	    return 0;
 	if (event_filename) {
-		// dont do this search unless needed
 		str = strstr(term, " name=");
 		if (str) {
 			int rc;
@@ -1556,7 +1574,7 @@ static int parse_daemon1(const lnode *n, search_items *s)
 		if (str) {
 			ptr = str + 5;
 			term = strchr(ptr, ' ');
-			if (term == NULL) 
+			if (term == NULL)
 				return 7;
 			saved = *term;
 			*term = 0;
@@ -1565,13 +1583,11 @@ static int parse_daemon1(const lnode *n, search_items *s)
 			if (errno)
 				return 8;
 			*term = saved;
-		} else
-			term = ptr;
+		}
 	}
 
 	// ses - optional
 	if (event_session_id != -2) {
-		ptr = term;
 		str = strstr(term, "ses=");
 		if (str) {
 			ptr = str + 4;
@@ -1585,8 +1601,7 @@ static int parse_daemon1(const lnode *n, search_items *s)
 			if (errno)
 				return 10;
 			*term = saved;
-		} else
-			term = ptr;
+		}
 	}
 
 	if (event_subject) {
@@ -1926,8 +1941,11 @@ static int parse_integrity(const lnode *n, search_items *s)
 }
 
 
-/* FIXME: If they are in permissive mode or hit an auditallow, there can 
- * be more than 1 avc in the same syscall. For now, we pickup just the first.
+/*
+ * If they are in permissive mode or hit an auditallow, there can be
+ * more than 1 avc in the same syscall/event. Each one will be it's own
+ * record. We will see each AVC one record at a time. The first one will
+ * initialize the anode list and subsequent ones will just add to it.
  */
 static int parse_avc(const lnode *n, search_items *s)
 {
@@ -1947,12 +1965,12 @@ static int parse_avc(const lnode *n, search_items *s)
 			term = n->message;
 			goto other_avc;
 		}
-		if (event_success != S_UNSET) {
+		// Do not override syscall success if already set.
+		// Syscall pass/fail is the authoritative value.
+		if (event_success != S_UNSET && s->success == S_UNSET) {
 			*term = 0;
-			// FIXME. Do not override syscall success if already
-			// set. Syscall pass/fail is the authoritative value.
 			if (strstr(str, "denied")) {
-				s->success = S_FAILED; 
+				s->success = S_FAILED;
 				an.avc_result = AVC_DENIED;
 			} else {
 				s->success = S_SUCCESS;
@@ -2029,7 +2047,7 @@ other_avc:
 			*term = 0;
 			s->comm = strdup(str);
 			*term = '"';
-		} else { 
+		} else {
 			s->comm = unescape(str);
 			if (s->comm == NULL) {
 				rc = 11;
@@ -2104,6 +2122,7 @@ other_avc:
 	if (term)
 		*term = ' ';
 
+	// This can be called multiple times. Only first time it initializes.
 	if (audit_avc_init(s) == 0) {
 		alist_append(s->avc, &an);
 	} else {
@@ -2810,5 +2829,135 @@ static int parse_kernel(lnode *n, search_items *s)
 	}
 
 	return 0;
+}
+
+//////// These are used by ausearch / aureport ///////////////
+
+/* read_first_ts - get timestamp of the first record in a log file
+ * @file: path to the log file
+ * @sec: returned seconds component
+ * @milli: returned milliseconds component
+ *
+ * Returns 0 on success and -1 on failure.
+ */
+static int read_first_ts(const char *file, time_t *sec, unsigned int *milli)
+{
+	FILE *fp;
+	char buf[MAX_AUDIT_MESSAGE_LENGTH];
+	char *p, *e;
+
+	*sec = 0;
+	*milli = 0;
+
+	fp = fopen(file, "rm");
+	if (fp == NULL)
+		return -1;
+	if (fgets_unlocked(buf, sizeof(buf), fp) == NULL) {
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+
+	p = strstr(buf, "audit(");
+	if (p == NULL)
+		return -1;
+	p += 6;
+	*sec = strtoll(p, &e, 10);
+	if (*e == '.')
+		*milli = strtoul(e + 1, &e, 10);
+
+	return 0;
+}
+
+/* audit_log_list - collect audit logs and their first timestamps
+ * @basefile: base audit log file
+ * @logs: returned array of log information
+ * @log_cnt: number of entries in @logs
+ *
+ * Returns 0 on success and -1 on failure.
+ */
+int audit_log_list(const char *basefile, struct audit_log_info **logs,
+                        size_t *log_cnt)
+{
+	char *filename;
+	size_t len;
+	int num = 0;
+	struct audit_log_info *list = NULL;
+
+	len = strlen(basefile) + 16;
+	filename = malloc(len);
+	if (filename == NULL)
+		return -1;
+
+	snprintf(filename, len, "%s", basefile);
+	do {
+		struct audit_log_info *tmp;
+		time_t sec;
+		unsigned int milli;
+
+		if (access(filename, R_OK) != 0)
+			break;
+		if (read_first_ts(filename, &sec, &milli))
+			sec = 0;
+		tmp = realloc(list, (num + 1) * sizeof(*list));
+		if (tmp == NULL) {
+			free(filename);
+			audit_log_free(list, num);
+			return -1;
+		}
+		list = tmp;
+		list[num].name = strdup(filename);
+		if (list[num].name == NULL) {
+			free(filename);
+			audit_log_free(list, num);
+			return -1;
+		}
+		list[num].sec = sec;
+		list[num].milli = milli;
+		num++;
+		snprintf(filename, len, "%s.%d", basefile, num);
+	} while (1);
+
+	free(filename);
+	*logs = list;
+	*log_cnt = num;
+	return 0;
+}
+
+/* audit_log_find_start - choose oldest log that may contain @start
+ * @logs: array of log information
+ * @log_cnt: number of logs
+ * @start: requested start time
+ *
+ * Returns index of the log to begin processing from.
+ */
+unsigned audit_log_find_start(const struct audit_log_info *logs,
+			      size_t log_cnt, time_t start)
+{
+	size_t start_idx = log_cnt ? log_cnt - 1 : 0;
+
+	if (start) {
+		ssize_t i;
+		for (i = log_cnt - 1; i >= 0; i--) {
+			if (logs[i].sec > start) {
+				if ((size_t)i < log_cnt - 1)
+					start_idx = i + 1;
+				break;
+			}
+		}
+	}
+	return start_idx;
+}
+
+/* audit_log_free - release memory held by audit_log_list */
+void audit_log_free(struct audit_log_info *logs, size_t log_cnt)
+{
+	size_t i;
+
+	if (logs == NULL)
+		return;
+	for (i = 0; i < log_cnt; i++)
+		free(logs[i].name);
+	free(logs);
 }
 

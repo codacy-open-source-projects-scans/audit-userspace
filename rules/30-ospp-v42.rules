@@ -12,7 +12,7 @@
 ## 30-ospp-v42-6-owner-change-failed.rules,
 ## 30-ospp-v42-6-owner-change-success.rules
 ##
-## original copies may be found in /usr/share/audit/sample-rules/
+## original copies may be found in /usr/share/audit-rules
 
 
 ## User add delete modify. This is covered by pam. However, someone could
@@ -73,6 +73,18 @@
 -a always,exit -F arch=b64 -F path=/usr/bin/at -F perm=x -F auid>=1000 -F auid!=unset -F key=special-config-changes
 -a always,exit -F arch=b32 -F path=/usr/sbin/grub2-set-bootflag -F perm=x -F auid>=1000 -F auid!=unset -F key=special-config-changes
 -a always,exit -F arch=b64 -F path=/usr/sbin/grub2-set-bootflag -F perm=x -F auid>=1000 -F auid!=unset -F key=special-config-changes
+
+## Capture mount and LSM attribute changes
+-a always,exit -F arch=b32 -S mount_setattr -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b64 -S mount_setattr -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b32 -S landlock_create_ruleset -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b64 -S landlock_create_ruleset -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b32 -S landlock_add_rule -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b64 -S landlock_add_rule -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b32 -S landlock_restrict_self -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b64 -S landlock_restrict_self -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b32 -S lsm_set_self_attr -F auid>=1000 -F auid!=unset -F key=special-config-changes
+-a always,exit -F arch=b64 -S lsm_set_self_attr -F auid>=1000 -F auid!=unset -F key=special-config-changes
 
 ## Privilege escalation via su or sudo. This is entirely handled by pam.
 ## Special case for systemd-run. It is not audit aware, specifically watch it

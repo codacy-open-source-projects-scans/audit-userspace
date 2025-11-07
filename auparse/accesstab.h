@@ -21,7 +21,7 @@
  * Location: ?
  */
 
-
+// _S(0x0U,	"F_OK"	) handled in interpret
 _S(0x1U,	"X_OK"	)
 _S(0x2U,	"W_OK"	)
 _S(0x4U,	"R_OK"	)

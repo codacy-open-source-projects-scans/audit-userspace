@@ -15,13 +15,14 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- * 
+ *
  * Authors:
  *	Steve Grubb <sgrubb@redhat.com>
  */
 #ifndef _PRIVATE_H_
 #define _PRIVATE_H_
 
+#include <stdint.h> // uint32_t
 #include "dso.h"
 
 #ifdef __cplusplus
@@ -112,6 +113,10 @@ struct auditd_remote_message_wrapper {
 	seq = _AUDIT_RMW_GETN32 (header,12);
 
 /* General */
+extern int audit_send(int fd, int type, const void *data, unsigned int size);
+extern int __audit_send(int fd, int type, const void *data, unsigned int size, int *seq);
+
+AUDIT_HIDDEN_START
 /* Internal syslog messaging */
 void audit_msg(int priority, const char *fmt, ...) 
 #ifdef __GNUC__
@@ -119,11 +124,6 @@ void audit_msg(int priority, const char *fmt, ...)
 #else
 	;
 #endif
-
-extern int audit_send(int fd, int type, const void *data, unsigned int size);
-extern int __audit_send(int fd, int type, const void *data, unsigned int size, int *seq);
-
-AUDIT_HIDDEN_START
 
 // This is the main messaging function used internally
 extern int audit_send_user_message(int fd, int type, hide_t hide_err,
@@ -134,6 +134,7 @@ const char *audit_perm_to_name(int perm);
 AUDIT_HIDDEN_END
 
 // libaudit.c
+struct audit_rule_data;	// Forward declaration to prevent warnings
 int _audit_parse_syscall(const char *optarg, struct audit_rule_data *rule);
 extern int _audit_permadded;
 extern int _audit_archadded;
