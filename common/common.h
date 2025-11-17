@@ -1,5 +1,5 @@
 /* common.h -- common utility functions used throughout
- * Copyright 2018-24 Red Hat Inc.
+ * Copyright 2018-25 Red Hat Inc.
  * All Rights Reserved.
  *
  * This library is free software; you can redistribute it and/or
@@ -29,19 +29,7 @@
 #endif
 #include <sys/types.h>
 #include "dso.h"
-// These macros originate in sys/cdefs.h
-#ifndef __attr_access
-#  define __attr_access(x)
-#endif
-#ifndef __attribute_malloc__
-#  define __attribute_malloc__
-#endif
-#ifndef __attr_dealloc
-#  define __attr_dealloc(dealloc, argno)
-#endif
-#ifndef __wur
-# define __wur
-#endif
+#include "gcc-attributes.h"
 
 /* Wrapper macros for optional atomics
  * Note: ATOMIC_INT and ATOMIC_UNSIGNED are defined in config.h */
@@ -62,7 +50,7 @@ AUDIT_HIDDEN_START
 
 char *audit_strsplit_r(char *s, char **savedpp);
 char *audit_strsplit(char *s);
-int audit_is_last_record(int type);
+int audit_is_last_record(int type) __attribute_const__;
 
 extern const char *SINGLE;
 extern const char *HALT;

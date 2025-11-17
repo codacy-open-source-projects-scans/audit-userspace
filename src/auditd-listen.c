@@ -262,7 +262,8 @@ static int send_token(int s, gss_buffer_t tok)
 	unsigned char lenbuf[4];
 	unsigned int len;
 
-	if (tok->length > 0xffffffffUL)
+	if (sizeof(tok->length) > sizeof(uint32_t) &&
+	    tok->length > 0xffffffffUL)
 		return -1;
 	len = tok->length;
 	lenbuf[0] = (len >> 24) & 0xff;
@@ -553,7 +554,6 @@ static void client_ack(void *ack_data, const unsigned char *header,
 		ar_write(io->io.fd, msg, strlen(msg));
 }
 
-extern void distribute_event(struct auditd_event *e);
 static void client_message (struct ev_tcp *io, unsigned int length,
 	unsigned char *header)
 {
@@ -564,10 +564,17 @@ static void client_message (struct ev_tcp *io, unsigned int length,
 	if (AUDIT_RMW_IS_MAGIC (header, length)) {
 		AUDIT_RMW_UNPACK_HEADER (header, hver, mver, type, mlen, seq)
 
-		ch = header[length];
-		header[length] = 0;
-		if (length > 1 && header[length-1] == '\n')
-			header[length-1] = 0;
+		size_t term_idx;
+
+		if (length >= MAX_AUDIT_MESSAGE_LENGTH)
+			term_idx = MAX_AUDIT_MESSAGE_LENGTH - 1;
+		else
+			term_idx = length;
+
+		ch = header[term_idx];
+		header[term_idx] = 0;
+		if (term_idx > 1 && header[term_idx-1] == '\n')
+			header[term_idx-1] = 0;
 		if (type == AUDIT_RMW_TYPE_HEARTBEAT) {
 			unsigned char ack[AUDIT_RMW_HEADER_SIZE];
 			AUDIT_RMW_PACK_HEADER (ack, 0, AUDIT_RMW_TYPE_ACK,
@@ -580,7 +587,7 @@ static void client_message (struct ev_tcp *io, unsigned int length,
 			if (e)
 				distribute_event(e);
 		}
-		header[length] = ch;
+		header[term_idx] = ch;
 	}
 }
 

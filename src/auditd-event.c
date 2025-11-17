@@ -93,10 +93,19 @@ static off_t log_size = 0;
 static pthread_t flush_thread;
 static pthread_mutex_t flush_lock;
 static pthread_cond_t do_flush;
-static volatile int flush;
+#ifdef HAVE_ATOMIC
+static ATOMIC_INT flush;
+#else
+static volatile ATOMIC_INT flush;
+#endif
 static auparse_state_t *au = NULL;
 
 /* Local definitions */
+// The reason 24 was chosen is lost in time. Enriched events start life with
+// format_raw which reserves 32 bytes. After that a newline, space a separator
+// get added. That leaves roughly 28 bytes. It is suspected that 24 was chosen
+// to at least allow one syscall or a uid to fully fit. In practice
+// MIN_SPACE_LEFT should never be hit unless the system uses very long paths.
 #define MIN_SPACE_LEFT 24
 
 static inline int from_network(const struct auditd_event *e)
@@ -236,14 +245,14 @@ static void *flush_thread_main(void *arg)
 		// In the event that the logging thread requests another
 		// flush before the first completes, this simply turns
 		// into a loop of fsyncs.
-		while (flush == 0) {
+		while (AUDIT_ATOMIC_LOAD(flush) == 0) {
 			pthread_cond_wait(&do_flush, &flush_lock);
 			if (AUDIT_ATOMIC_LOAD(stop)) {
 				pthread_mutex_unlock(&flush_lock);
 				return NULL;
 			}
 		}
-		flush = 0;
+		AUDIT_ATOMIC_STORE(flush, 0);
 		pthread_mutex_unlock(&flush_lock);
 
 		if (log_fd >= 0)
@@ -258,7 +267,7 @@ static void init_flush_thread(void)
 {
 	pthread_mutex_init(&flush_lock, NULL);
 	pthread_cond_init(&do_flush, NULL);
-	flush = 0;
+	AUDIT_ATOMIC_STORE(flush, 0);
 	pthread_create(&flush_thread, NULL, flush_thread_main, NULL);
 	pthread_detach(flush_thread);
 }
@@ -345,7 +354,7 @@ static int format_raw(const struct audit_reply *rep)
 	        /* Replace \n with space so it looks nicer. */
 		ptr = format_buf;
 	        while (*ptr) {
-			if (*ptr == '\n')
+			if (unlikely(*ptr == '\n'))
 			        *ptr = ' ';
 			ptr++;
 		}
@@ -580,7 +589,9 @@ void cleanup_event(struct auditd_event *e)
 	// into the middle of the reply allocation. Check for it.
 	if (e->reply.message != e->reply.msg.data)
 		free((void *)e->reply.message);
-	if (!event_is_prealloc || !event_is_prealloc(e))
+	if (!event_is_prealloc)
+		free(e);
+	else if (!event_is_prealloc(e))
 		free(e);
 }
 
@@ -669,7 +680,7 @@ void handle_event(struct auditd_event *e)
 						}
 					} else {
 						pthread_mutex_lock(&flush_lock);
-						flush = 1;
+						AUDIT_ATOMIC_STORE(flush, 1);
 						pthread_cond_signal(&do_flush);
 						pthread_mutex_unlock(
 								   &flush_lock);
