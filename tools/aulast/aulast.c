@@ -497,7 +497,7 @@ int main(int argc, char *argv[])
 				file = argv[i];
 			} else {
 				fprintf(stderr,"stdin already given\n");
-				return 1;
+				goto arg_error;
 			}
 		} else if (strcmp(argv[i], "--bad") == 0) {
 			bad = 1;
@@ -510,7 +510,7 @@ int main(int argc, char *argv[])
 				use_stdin = 1;
 			else {
 				fprintf(stderr, "file already given\n");
-				return 1;
+				goto arg_error;
 			}
 		} else if (strcmp(argv[i], "--user") == 0) {
 			if (user == NULL) {
@@ -518,7 +518,7 @@ int main(int argc, char *argv[])
 				user = argv[i];
 			} else {
 				usage();
-				return 1;
+				goto arg_error;
 			}
 		} else if (strcmp(argv[i], "--tty") == 0) {
 			if (cterm == NULL) {
@@ -526,13 +526,13 @@ int main(int argc, char *argv[])
 				cterm = argv[i];
 			} else {
 				usage();
-				return 1;
+				goto arg_error;
 			}
 		} else if (strcmp(argv[i], "--debug") == 0) {
 			debug = 1;
 		} else {
 			usage();
-			return 1;
+			goto arg_error;
 		}
 	}
 	list_create(&l);
@@ -611,6 +611,11 @@ int main(int argc, char *argv[])
 	if (f)
 		fclose(f);
 	return 0;
+
+arg_error:
+	if (f)
+		fclose(f);
+	return 1;
 
 error_exit_1:
 	list_clear(&l);

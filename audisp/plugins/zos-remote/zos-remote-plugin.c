@@ -230,7 +230,7 @@ push_event(auparse_state_t * au, auparse_cb_event_t cb_event_type,
          * We assume the first record type found is the
          * 'originating' audit record
          */
-        sprintf(logString, "Linux (%s): type: %s", node, orig_type);
+        snprintf(logString, ZOS_REMOTE_LOGSTRING_SIZE, "Linux (%s): type: %s", node, orig_type);
 	free((void *)node);
 
         /* 

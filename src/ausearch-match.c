@@ -130,20 +130,21 @@ int match(llist *l)
 
 					list_first(l);
 					n = list_get_cur(l);
-					do {
+					while (n) {
 						int_node *in;
 						ilist_first(event_type);
 						in = ilist_get_cur(event_type);
-						do {
+						while (in) {
 							if (in->num == n->type){
 								found = 1;
 								break;
 							}
-						} while((in =
-						    ilist_next(event_type)));
+							in = ilist_next(event_type);
+						}
 						if (found)
 							break;
-					} while ((n = list_next(l)));
+						n = list_next(l);
+					}
 					if (!found)
 						return 0;
 				}
@@ -160,7 +161,7 @@ int match(llist *l)
 
 						slist_first(sptr);
 						sn=slist_get_cur(sptr);
-						do {
+						while (sn) {
 							if (sn->str == NULL)
 								return 0;
 							if (strmatch(
@@ -169,7 +170,8 @@ int match(llist *l)
 								found = 1;
 								break;
 							}
-						} while ((sn=slist_next(sptr)));
+							sn = slist_next(sptr);
+						}
 
 						if (!found && l->s.cwd == NULL)
 							return 0;
@@ -219,7 +221,7 @@ int match(llist *l)
 
 						slist_first(sptr);
 						sn=slist_get_cur(sptr);
-						do {
+						while (sn) {
 							if (sn->str == NULL)
 								return 0;
 							if (strmatch(
@@ -228,7 +230,8 @@ int match(llist *l)
 								found = 1;
 								break;
 							}
-						} while ((sn=slist_next(sptr)));
+							sn = slist_next(sptr);
+						}
 						if (!found)
 							return 0;
 					}

@@ -73,9 +73,10 @@ int delete_all_rules(int fd)
 				break;
 
 			if (rep.type == NLMSG_ERROR && rep.error->error) {
-				audit_msg(LOG_ERR, 
-					"Error receiving rules list (%s)", 
+				audit_msg(LOG_ERR,
+					"Error receiving rules list (%s)",
 					strerror(-rep.error->error));
+				list_clear(&l);
 				return -1;
 			}
 
@@ -97,7 +98,8 @@ int delete_all_rules(int fd)
 		rc = audit_send(fd, AUDIT_DEL_RULE, n->r, n->size);
 		if (rc < 0) {
 			audit_msg(LOG_ERR, "Error deleting rule (%s)",
-				strerror(-rc)); 
+				strerror(-rc));
+			list_clear(&l);
 			return -1;
 		}
 		n = list_next(&l);

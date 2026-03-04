@@ -641,7 +641,7 @@ typedef struct
 static int opt_usage(opt_handler_params_t *args)
 {
 	usage();
-	return OPT_ERROR_NO_REPLY;
+	return OPT_SUCCESS_NO_REPLY;
 }
 
 static int opt_interpret(opt_handler_params_t *args)

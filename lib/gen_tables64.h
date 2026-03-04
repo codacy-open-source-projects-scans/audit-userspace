@@ -48,10 +48,14 @@ inline static int s2i_64__(const char *strings, const unsigned *s_table,
 		const int64_t *i_table, size_t n, const char *s, int64_t *value)
 {
     size_t lo = 0, hi = 0;
+    if (n == 0)
+	    return 0;
+
     ssize_t left = 0, right = n - 1;
 
     while (left <= right) {	   /* invariant: left <= x <= right */
-        size_t mid, off, i;
+        ssize_t mid;
+        size_t off, i;
         const char *t;
         int r;
 
@@ -103,10 +107,13 @@ inline static const char *i2s_64_bsearch__(const char *strings,
 {
     ssize_t left, right;
 
+    if (n == 0)
+	    return NULL;
+
     left = 0;
     right = n - 1;
     while (left <= right) {    /* invariant: left <= x <= right */
-        size_t mid;
+        ssize_t mid;
         int64_t mid_val;
 
         mid = (left + right) / 2;

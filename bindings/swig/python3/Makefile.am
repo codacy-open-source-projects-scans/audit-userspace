@@ -31,10 +31,19 @@ pyexec_LTLIBRARIES = _audit.la
 _audit_la_CFLAGS = -shared
 _audit_la_LDFLAGS = -module -avoid-version -Wl,-z,relro
 _audit_la_DEPENDENCIES =${top_srcdir}/lib/audit_logging.h ${top_builddir}/lib/libaudit.la
-_audit_la_LIBADD = ${top_builddir}/lib/libaudit.la
+_audit_la_LIBADD = ${top_builddir}/lib/libaudit.la $(PYTHON3_LIBS)
 nodist__audit_la_SOURCES  = audit_wrap.c
 audit.py audit_wrap.c: ${srcdir}/../src/auditswig.i 
 	swig -o audit_wrap.c ${SWIG_FLAGS} ${SWIG_INCLUDES} ${srcdir}/../src/auditswig.i 
 
 CLEANFILES = audit.py* audit_wrap.c *~
 
+check-local:
+	@python3_embed_libs=`python3-config --embed --libs 2>/dev/null`; \
+	if test -z "$$python3_embed_libs"; then \
+		echo "SKIP: python3-config --embed --libs is unavailable"; \
+		exit 77; \
+	fi; \
+	$(MAKE) clean >/dev/null; \
+	$(MAKE) all-am LDFLAGS="$(LDFLAGS) -Wl,--no-undefined" \
+		PYTHON3_LIBS="$$python3_embed_libs"
