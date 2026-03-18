@@ -63,7 +63,7 @@ int start_config_manager(struct auditd_event *e)
 		                config_thread_main, e) > 0) {
 			audit_msg(LOG_ERR,
 			"Couldn't create config thread, no config changes");
-			free(e);
+			cleanup_event(e);
 			pthread_mutex_unlock(&config_lock);
 		        rc = 1;
 	        }
@@ -71,7 +71,7 @@ int start_config_manager(struct auditd_event *e)
 	} else {
 		audit_msg(LOG_ERR,
 			"Config thread already running, no config changes");
-		free(e);
+		cleanup_event(e);
 		rc = 1;
 	}
 	return rc;
@@ -115,7 +115,7 @@ static void *config_thread_main(void *arg)
 				         &e->reply, "failed");
 		send_audit_event(AUDIT_DAEMON_CONFIG, txt);
 		free_config(&new_config);
-		free(e);
+		cleanup_event(e);
 	}
 
 	pthread_mutex_unlock(&config_lock);

@@ -91,13 +91,21 @@ void wall_message(const char* format, ...)
 {
 	struct utmpx* entry;
 	char message[512];
+	char wall_buf[640];
 	va_list args;
 	int fd;
+	ssize_t len;
 
 	// Format the message
 	va_start(args, format);
 	vsnprintf(message, sizeof(message), format, args);
 	va_end(args);
+	len = snprintf(wall_buf, sizeof(wall_buf),
+		"\nBroadcast message from audit daemon:\n%s\n", message);
+	if (len <= 0)
+		return;
+	if ((size_t)len >= sizeof(wall_buf))
+		len = sizeof(wall_buf) - 1;
 
 	setutxent();
 
@@ -109,9 +117,29 @@ void wall_message(const char* format, ...)
 			snprintf(tty_path, sizeof(tty_path), "/dev/%s",
 				 entry->ut_line);
 
-			fd = open(tty_path, O_WRONLY | O_NOCTTY);
+			fd = open(tty_path, O_WRONLY | O_NOCTTY | O_NONBLOCK);
 			if (fd != -1) {
-				dprintf(fd, "\nBroadcast message from audit daemon:\n%s\n", message);
+				ssize_t off = 0;
+
+				while (off < len) {
+					ssize_t rc;
+
+					rc = write(fd, wall_buf+off, len - off);
+					// Allow partial writes
+					if (rc > 0) {
+						off += rc;
+						continue;
+					}
+					// Allow signal interruptions
+					if (rc < 0 && errno == EINTR)
+						continue;
+					// Breaking here to prevent holding up
+					// the daemon on flow-controlled
+					// terminals.
+					if (rc < 0 && (errno == EAGAIN))
+						break;
+					break;
+				}
 				close(fd);
 			}
 		}
@@ -177,7 +205,7 @@ const char *get_progname(void)
 		ssize_t len = readlink("/proc/self/exe",tname,sizeof(tname)-1);
 		if (len != -1) {
 			tname[len] = '\0';
-			strcpy(progname, basename(progname));
+			strcpy(progname, basename(tname));
 		} else
 			strcpy(progname, "unknown");
 	}

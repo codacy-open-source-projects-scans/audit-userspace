@@ -74,6 +74,7 @@ uninstall-hook:
 	rm ${DESTDIR}${sysconfdir}/${libconfig}
 	rm ${DESTDIR}${initdir}/auditd.service
 	rm ${DESTDIR}${initdir}/audit-rules.service
+if INSTALL_LEGACY_ACTIONS
 	rm ${DESTDIR}${legacydir}/rotate
 	rm ${DESTDIR}${legacydir}/resume
 	rm ${DESTDIR}${legacydir}/reload
@@ -81,5 +82,6 @@ uninstall-hook:
 	rm ${DESTDIR}${legacydir}/stop
 	rm ${DESTDIR}${legacydir}/restart
 	rm ${DESTDIR}${legacydir}/condrestart
+endif
 	rm ${DESTDIR}$(prefix)/lib/tmpfiles.d/audit.conf
 	rm ${DESTDIR}${sysconfdir}/bash_completion.d/audit.bash_completion

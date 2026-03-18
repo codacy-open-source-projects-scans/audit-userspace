@@ -3,6 +3,7 @@
 #include "structmember.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <time.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -52,6 +53,16 @@ int PyFile_Check(PyObject *f) {
 
 static int debug = 0;
 static PyObject *NoParserError = NULL;
+
+/*
+ * duplicate_fd_cloexec - duplicate a file descriptor with close-on-exec set
+ * fd: file descriptor to duplicate
+ * returns: duplicated descriptor on success, -1 on error with errno set
+ */
+static inline int duplicate_fd_cloexec(int fd)
+{
+	return fcntl(fd, F_DUPFD_CLOEXEC, 0);
+}
 
 /*===========================================================================
  *                                AuEvent
@@ -451,7 +462,7 @@ AuParser_init(AuParser *self, PyObject *args, PyObject *kwds)
             PyErr_SetString(PyExc_ValueError, "source must be resolvable to a file descriptor when source_type is AUSOURCE_DESCRIPTOR");
             return -1;
         }
-        dup_fd = dup(fd);
+        dup_fd = duplicate_fd_cloexec(fd);
         if (dup_fd < 0) {
             PyErr_SetFromErrno(PyExc_EnvironmentError);
             return -1;
@@ -477,7 +488,7 @@ AuParser_init(AuParser *self, PyObject *args, PyObject *kwds)
             PyErr_SetString(PyExc_TypeError, "source must be open file when source_type is AUSOURCE_FILE_POINTER");
             return -1;
         }
-        dup_fd = dup(fd);
+        dup_fd = duplicate_fd_cloexec(fd);
         if (dup_fd < 0) {
             PyErr_SetFromErrno(PyExc_EnvironmentError);
             return -1;
@@ -488,29 +499,38 @@ AuParser_init(AuParser *self, PyObject *args, PyObject *kwds)
             PyErr_SetFromErrno(PyExc_EnvironmentError);
             return -1;
         }
-	const char *filename = NULL;
+        const char *filename = NULL;
+#if PY_MAJOR_VERSION >= 3
+        PyObject *name_obj = NULL;
+#endif
 #if PY_MAJOR_VERSION < 3
         /* PyFile_Name is available in Python 2 */
         filename = PYSTR_ASSTRING(PyFile_Name(source));
 #else
         /* In Python 3 obtain the name attribute if possible */
-        PyObject *name_obj = PyObject_GetAttrString(source, "name");
+        name_obj = PyObject_GetAttrString(source, "name");
         if (name_obj && PYSTR_CHECK(name_obj))
             filename = PYSTR_ASSTRING(name_obj);
-	Py_XDECREF(name_obj);
 #endif
         if ((self->au = auparse_init(source_type, fp)) == NULL) {
             if (filename)
                 PyErr_SetFromErrnoWithFilename(PyExc_IOError, filename);
             else
                 PyErr_SetFromErrno(PyExc_IOError);
+#if PY_MAJOR_VERSION >= 3
+            Py_XDECREF(name_obj);
+#endif
             fclose(fp);
             return -1;
         }
+#if PY_MAJOR_VERSION >= 3
+        Py_XDECREF(name_obj);
+#endif
     } break;
     case AUSOURCE_FEED: {
         if (source != Py_None) {
-            PyErr_SetString(PyExc_ValueError, "source must be None when source_type is AUSOURCE_FEED");
+            PyErr_SetString(PyExc_ValueError,
+		"source must be None when source_type is AUSOURCE_FEED");
             return -1;
         }
         if ((self->au = auparse_init(source_type, NULL)) == NULL) {

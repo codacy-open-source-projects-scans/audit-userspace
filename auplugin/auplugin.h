@@ -53,7 +53,7 @@ enum auplugin_mem {
 	MEM_SELF_MANAGED, /* Internal buffer owned by fgets. */
 	MEM_MALLOC,	  /* User-supplied malloc buffer; fgets frees it. */
 	MEM_MMAP,	  /* User-supplied mmap buffer; fgets munmaps it. */
-	MEM_MMAP_FILE	  /* Read-only mmap file data; fgets never writes. */
+	MEM_MMAP_FILE	  /* Read-only mmap file data; fgets munmaps it. */
 };
 
 enum {

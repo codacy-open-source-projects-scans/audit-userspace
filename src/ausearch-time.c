@@ -134,6 +134,7 @@ static void set_tm_hour(struct tm *d)
         d->tm_sec = 0;          /* seconds */
         d->tm_min = 0;          /* minutes */
 	replace_time(d, tv);
+	replace_date(d, tv);
 }
 
 static int set_tm_boot(struct tm *d)

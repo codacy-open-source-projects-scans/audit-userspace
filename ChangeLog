@@ -1,4 +1,6 @@
 4.1.4
+- Update syscalls and io_uring tables for the 7.0 kernel (Hilko Bengen)
+- Code cleanups (mikhailnov)
 
 4.1.3
 - Reduce memory churn in the af_unix plugin

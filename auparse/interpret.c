@@ -2590,6 +2590,12 @@ static const char* print_a0(auparse_state_t *au, const char* val,
 		else if (*sys == 'c') {
 			if (strcmp(sys, "clock_settime") == 0)
 				return print_clock_id(val);
+			// Don't get fooled by the man page. It always
+			// shows the glibc wrapper arguments.
+			else if (strcmp(sys, "clone") == 0)
+				return print_clone_flags(val);
+			else if (strcmp(sys, "clone2") == 0)
+				return print_clone_flags(val);
 		}
 		else if (*sys == 'p') {
 			if (strcmp(sys, "personality") == 0)
@@ -2865,13 +2871,7 @@ static const char *print_a2(auparse_state_t *au, const char *val,
 				return print_seek(val);
 			else if (strcmp(sys, "listxattrat") == 0)
 				return print_xattr_atflags(val);
-		} else if (*sys == 'c') {
-			if (strcmp(sys, "clone") == 0)
-				return print_clone_flags(val);
-			else if (strcmp(sys, "clone2") == 0)
-				return print_clone_flags(val);
-		}
-		else if (strstr(sys, "chown"))
+		} else if (strstr(sys, "chown"))
 			return print_gid(au, val, 16);
 		else if (strcmp(sys, "tgkill") == 0)
 			return print_signals(val, 16);

@@ -875,6 +875,7 @@ static int opt_delete(opt_handler_params_t *args)
 		retval = OPT_ERROR_NO_REPLY;
 	} else if (rc == 1) {
 		audit_msg(LOG_INFO, "Delete rule - possible is deprecated");
+		args->finish = 1;
 		return OPT_DEPRECATED; /* deprecated - eat it */
 	} else
 		retval = OPT_SUCCESS_RULE; /* success - please send */
@@ -1584,6 +1585,12 @@ static int fileopt(const char *file)
 	}
 	if (!S_ISREG(st.st_mode)) {
 		audit_msg(LOG_ERR, "Error - %s is not a regular file", file);
+		close(tfd);
+		return 1;
+	}
+	if (st.st_mode & S_IWOTH) {
+		audit_msg(LOG_ERR,
+			"Error - %s is world writable", file);
 		close(tfd);
 		return 1;
 	}
