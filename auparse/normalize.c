@@ -1291,8 +1291,9 @@ static int normalize_compound(auparse_state_t *au)
 			set_file_object(au, 1);
 			if (is_unset(D.thing.primary)) {
 				int r, num = auparse_get_num_records(au);
-				for (r = 1; r <= num; r++) {
-					auparse_goto_record_num(au, r);
+				for (r = 1; r < num; r++) {
+					if (auparse_goto_record_num(au, r) != 1)
+						continue;
 					if (auparse_get_type(au) == AUDIT_PATH) {
 						auparse_first_field(au);
 						set_prime_object(au, "name", r);

@@ -284,15 +284,15 @@ static void get_auditd_status(void)
 				       &r.plugin_max_depth);
 			} else if (memcmp(buf, "glibc arena", 11) == 0) {
 				sscanf(buf,
-				       "glibc total memory is: %llu",
+				       "glibc arena (total memory) is: %llu",
 				       &r.total_memory);
 			} else if (memcmp(buf, "glibc uordblks", 13) == 0) {
 				sscanf(buf,
-				       "glibc in use memory is: %llu",
+				       "glibc uordblks (in use memory) is: %llu",
 				       &r.memory_in_use);
 			} else if (memcmp(buf, "glibc fordblks", 14) == 0) {
 				sscanf(buf,
-				       "glibc total free space is: %llu",
+				       "glibc fordblks (total free space) is: %llu",
 				       &r.memory_free);
 				break; // This is last item, break free
 			}
@@ -472,4 +472,3 @@ static void handle_event(auparse_state_t *au, auparse_cb_event_t cb_event_type,
 			break;
 	}
 }
-

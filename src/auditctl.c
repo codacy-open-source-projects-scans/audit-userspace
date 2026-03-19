@@ -644,7 +644,7 @@ static int opt_usage(opt_handler_params_t *args)
 	return OPT_SUCCESS_NO_REPLY;
 }
 
-static int opt_interpret(opt_handler_params_t *args)
+static int opt_ignore(opt_handler_params_t *args)
 {
 	ignore = 1;
 	return OPT_SUCCESS_NO_REPLY;
@@ -1368,7 +1368,7 @@ struct {
 } opt_handlers[] = {
 	// short options
 	{'h', opt_usage},
-	{'i', opt_interpret},
+	{'i', opt_ignore},
 	{'c', opt_continue},
 	{'s', opt_status},
 	{'e', opt_enabled},

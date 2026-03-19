@@ -164,7 +164,10 @@ void output_state(void)
 	FILE *f = fopen(STATE_FILE, "wt");
 	dump_state = 0;
 	if (f) {
-		char *metrics = auparse_metrics(au);
+		char *metrics = NULL;
+
+		if (au)
+			metrics = auparse_metrics(au);
 		if (metrics) {
 			fprintf(f, "auparse\n=======\n");
 			fprintf(f, "%s\n\n", metrics);
@@ -262,4 +265,3 @@ static void handle_event(auparse_state_t *p,
 	/* Check if user doing something strange */
 	process_behavior_model(au, &config);
 }
-

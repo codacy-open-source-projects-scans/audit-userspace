@@ -839,6 +839,7 @@ static int negotiate_credentials (void)
 
 	int krberr;
 	krb5_creds my_creds;
+	int have_creds = 0;
 	const char *krb5_client_name;
 	char *slashptr;
 	char host_name[255];
@@ -941,6 +942,7 @@ static int negotiate_credentials (void)
 		KLOG (krberr, "krb5_get_init_creds_keytab");
 		goto error5;
 	}
+	have_creds = 1;
 
 	/* Create the cache... */
 	krberr = krb5_cc_initialize(kcontext, ccache, audit_princ);
@@ -1059,9 +1061,12 @@ static int negotiate_credentials (void)
 	syslog(LOG_INFO, "GSS-API Connected to: %s",
 		  (char *)recv_tok.value);
 #endif
+	krb5_free_cred_contents(kcontext, &my_creds);
 	return 0;
 
 error5:
+	if (have_creds)
+		krb5_free_cred_contents(kcontext, &my_creds);
 	krb5_cc_close(kcontext, ccache);
 	ccache = NULL;
 error4:
@@ -1749,4 +1754,3 @@ static int relay_event(const char *s, size_t len)
 
 	return rc;
 }
-
