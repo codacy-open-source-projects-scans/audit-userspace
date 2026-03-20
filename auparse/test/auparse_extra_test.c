@@ -137,6 +137,22 @@ static void test_path_norm(void)
 	auparse_destroy(au);
 }
 
+
+static void test_single_char_field_values(void)
+{
+	const char buf[] =
+		"type=LOGIN msg=audit(1143146623.787:142): name=: acct=,\n";
+	auparse_state_t *au = auparse_init(AUSOURCE_BUFFER, buf);
+
+	assert(au != NULL);
+	assert(auparse_next_event(au) > 0);
+	assert(auparse_find_field(au, "name") != NULL);
+	assert(strcmp(auparse_get_field_str(au), "") == 0);
+	assert(auparse_find_field(au, "acct") != NULL);
+	assert(strcmp(auparse_get_field_str(au), "") == 0);
+	auparse_destroy(au);
+}
+
 int main(void)
 {
 	test_new_buffer();
@@ -145,6 +161,7 @@ int main(void)
 	test_compare();
 	test_timestamp_milli();
 	test_path_norm();
+	test_single_char_field_values();
 	printf("extra auparse tests: all passed\n");
 	return 0;
 }

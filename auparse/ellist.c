@@ -169,15 +169,16 @@ static int parse_up_record(rnode* r)
 				n.val[vlen-1] = 0;
 				vlen--;
 			}
-			if (n.val[vlen-1] == ',') {
+			// Single-character values can become empty after trimming.
+			if (vlen && n.val[vlen-1] == ',') {
 				n.val[vlen-1] = 0;
 				vlen--;
 			}
-			if (n.val[vlen-1] == '\'') {
+			if (vlen && n.val[vlen-1] == '\'') {
 				n.val[vlen-1] = 0;
 				vlen--;
 			}
-			if (n.val[vlen-1] == ')') {
+			if (vlen && n.val[vlen-1] == ')') {
 				if (strcmp(n.val, "(none)") &&
 					strcmp(n.val, "(null)")) {
 					n.val[vlen-1] = 0;

@@ -45,14 +45,17 @@ static inline int alloc_array(nvlist *l)
 
 void nvlist_create(nvlist *l)
 {
-	if (l) {
-		if (alloc_array(l))
-			return;
-		l->cur = 0;
-		l->cnt = 0;
-		l->record = NULL;
-		l->end = NULL;
-	}
+	if (l == NULL)
+		return;
+
+	l->array = NULL;
+	l->cur = 0;
+	l->cnt = 0;
+	l->size = 0;
+	l->record = NULL;
+	l->end = NULL;
+
+	alloc_array(l);
 }
 
 nvnode *nvlist_next(nvlist *l)
