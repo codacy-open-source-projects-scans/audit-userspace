@@ -1842,6 +1842,7 @@ int audit_rule_fieldpair_data(struct audit_rule_data **rulep, char *pair,
 			rule->buflen += vlen;
 			tmp = realloc(rule, sizeof(*rule) + rule->buflen);
 			if (tmp == NULL) {
+				*rulep = NULL;
 				free(rule);
 				audit_msg(LOG_ERR, "Cannot realloc memory!");
 				return -3;

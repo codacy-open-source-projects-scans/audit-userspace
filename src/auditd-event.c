@@ -807,6 +807,9 @@ static void check_log_file_size(void)
 				logging_suspended = 1;
 				exec_child_pid =
 					safe_exec(config->max_log_file_exe);
+				if (exec_child_pid < 1)
+					audit_msg(LOG_ALERT,
+  "Audit daemon failed to exec max_log_file_action helper - logging suspended");
 				break;
 			case SZ_SUSPEND:
 				audit_msg(LOG_ERR,

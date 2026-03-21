@@ -3018,6 +3018,7 @@ static const char *print_hook(auparse_state_t *au, const char *val)
 	const char *str;
 	const char *fam;
 	int proto = -1;
+	unsigned int record, field;
 
 	errno = 0;
 	hook = strtoul(val, NULL, 16);
@@ -3027,6 +3028,8 @@ static const char *print_hook(auparse_state_t *au, const char *val)
 		return out;
 	}
 
+	record = auparse_get_record_num(au);
+	field = auparse_get_field_num(au);
 	fam = auparse_find_field(au, "family");
 	if (fam) {
 		errno = 0;
@@ -3034,7 +3037,8 @@ static const char *print_hook(auparse_state_t *au, const char *val)
 		if (errno)
 			proto = -1;
 	}
-	auparse_find_field(au, "hook");
+	if (auparse_goto_record_num(au, record))
+		auparse_goto_field_num(au, field);
 
 	if (proto == NFPROTO_ARP)
 		str = arphook_i2s(hook);
