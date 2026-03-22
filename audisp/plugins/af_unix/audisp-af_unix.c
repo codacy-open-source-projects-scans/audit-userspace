@@ -70,7 +70,8 @@ static struct mallinfo2 last_mi;
 #endif
 
 #define DEFAULT_QUEUE_DEPTH 512
-#define QUEUE_ENTRY_SIZE MAX_AUDIT_EVENT_FRAME_SIZE+1
+#define V1_TEXT_PREFIX (32+12) // largest record type + formatting
+#define QUEUE_ENTRY_SIZE (MAX_AUDIT_EVENT_FRAME_SIZE+V1_TEXT_PREFIX+1)
 
 static size_t queue_depth = DEFAULT_QUEUE_DEPTH;
 static struct queue *queue;

@@ -79,7 +79,11 @@ static void init_flush_thread(void);
 
 /* Local Data */
 static struct daemon_conf *config;
-static volatile int log_fd;
+#ifdef HAVE_ATOMIC
+static ATOMIC_INT log_fd;
+#else
+static volatile ATOMIC_INT log_fd;
+#endif
 static FILE *log_file = NULL;
 static unsigned int disk_err_warning = 0;
 static int fs_space_warning = 0;
@@ -140,7 +144,7 @@ void write_logging_state(FILE *f)
 		fprintf(f,"logs detected last rotate/shift = %u\n", known_logs);
 		fprintf(f, "space left on partition = %s\n",
 					fs_space_left ? "yes" : "no");
-		rc = fstatfs(log_fd, &buf);
+		rc = fstatfs(AUDIT_ATOMIC_LOAD(log_fd), &buf);
 		if (rc == 0) {
 			fprintf(f, "Logging partition free space = %llu MiB\n",
 				(long long unsigned)
@@ -167,8 +171,8 @@ void shutdown_events(void)
 	pthread_cancel(flush_thread);
 	free((void *)format_buf);
 	auparse_destroy_ext(au, AUPARSE_DESTROY_ALL);
-	if (log_fd >= 0)
-		fsync(log_fd);
+	if (AUDIT_ATOMIC_LOAD(log_fd) >= 0)
+		fsync(AUDIT_ATOMIC_LOAD(log_fd));
 	if (log_file)
 		fclose(log_file);
 }
@@ -177,17 +181,17 @@ int init_event(struct daemon_conf *conf)
 {
 	/* Store the netlink descriptor and config info away */
 	config = conf;
-	log_fd = -1;
+	AUDIT_ATOMIC_STORE(log_fd, -1);
 
 	/* Now open the log */
 	if (config->daemonize == D_BACKGROUND) {
 		fix_disk_permissions();
 		if (open_audit_log())
 			return 1;
-		setup_percentages(config, log_fd);
+		setup_percentages(config, AUDIT_ATOMIC_LOAD(log_fd));
 	} else {
-		log_fd = 1; // stdout
-		log_file = fdopen(log_fd, "a");
+		AUDIT_ATOMIC_STORE(log_fd, 1); // stdout
+		log_file = fdopen(AUDIT_ATOMIC_LOAD(log_fd), "a");
 		if (log_file == NULL) {
 			audit_msg(LOG_ERR,
 				"Error setting up stdout descriptor (%s)",
@@ -255,8 +259,8 @@ static void *flush_thread_main(void *arg)
 		AUDIT_ATOMIC_STORE(flush, 0);
 		pthread_mutex_unlock(&flush_lock);
 
-		if (log_fd >= 0)
-			fsync(log_fd);
+		if (AUDIT_ATOMIC_LOAD(log_fd) >= 0)
+			fsync(AUDIT_ATOMIC_LOAD(log_fd));
 	}
 	return NULL;
 }
@@ -672,8 +676,8 @@ void handle_event(struct auditd_event *e)
 				if (config->daemonize == D_BACKGROUND) {
 					if (config->flush == FT_INCREMENTAL) {
 						/* EIO is only likely failure */
-						if (log_fd >= 0 &&
-							fsync(log_fd) != 0) {
+						if (AUDIT_ATOMIC_LOAD(log_fd) >= 0 &&
+							fsync(AUDIT_ATOMIC_LOAD(log_fd)) != 0) {
 						     do_disk_error_action(
 							"fsync",
 							errno);
@@ -803,7 +807,7 @@ static void check_log_file_size(void)
 				if (log_file)
 					fclose(log_file);
 				log_file = NULL;
-				log_fd = -1;
+				AUDIT_ATOMIC_STORE(log_fd, -1);
 				logging_suspended = 1;
 				exec_child_pid =
 					safe_exec(config->max_log_file_exe);
@@ -821,7 +825,7 @@ static void check_log_file_size(void)
 				if (log_file)
 					fclose(log_file);
 				log_file = NULL;
-				log_fd = -1;
+				AUDIT_ATOMIC_STORE(log_fd, -1);
 				logging_suspended = 1;
 				break;
 			case SZ_ROTATE:
@@ -849,10 +853,10 @@ static void check_space_left(void)
 	int rc;
 	struct statfs buf;
 
-	if (log_fd < 0)
+	if (AUDIT_ATOMIC_LOAD(log_fd) < 0)
 		return;
 
-        rc = fstatfs(log_fd, &buf);
+        rc = fstatfs(AUDIT_ATOMIC_LOAD(log_fd), &buf);
         if (rc == 0) {
 		if (buf.f_bavail < 5) {
 			/* we won't consume the last 5 blocks */
@@ -973,7 +977,7 @@ static void do_space_left_action(int admin)
 			if (log_file)
 				fclose(log_file);
 			log_file = NULL;
-			log_fd = -1;
+			AUDIT_ATOMIC_STORE(log_fd, -1);
 			logging_suspended = 1;
 			if (admin)
 				safe_exec(config->admin_space_left_exe);
@@ -989,7 +993,7 @@ static void do_space_left_action(int admin)
 			if (log_file)
 				fclose(log_file);
 			log_file = NULL;
-			log_fd = -1;
+			AUDIT_ATOMIC_STORE(log_fd, -1);
 			logging_suspended = 1;
 			break;
 		case FA_SINGLE:
@@ -1034,7 +1038,7 @@ static void do_disk_full_action(void)
 			if (log_file)
 				fclose(log_file);
 			log_file = NULL;
-			log_fd = -1;
+			AUDIT_ATOMIC_STORE(log_fd, -1);
 			logging_suspended = 1;
 			safe_exec(config->disk_full_exe);
 			break;
@@ -1047,7 +1051,7 @@ static void do_disk_full_action(void)
 			if (log_file)
 				fclose(log_file);
 			log_file = NULL;
-			log_fd = -1;
+			AUDIT_ATOMIC_STORE(log_fd, -1);
 			logging_suspended = 1;
 			break;
 		case FA_SINGLE:
@@ -1091,7 +1095,7 @@ static void do_disk_error_action(const char *func, int err)
 			if (log_file)
 				fclose(log_file);
 			log_file = NULL;
-			log_fd = -1;
+			AUDIT_ATOMIC_STORE(log_fd, -1);
 			logging_suspended = 1;
 			safe_exec(config->disk_error_exe);
 			break;
@@ -1104,7 +1108,7 @@ static void do_disk_error_action(const char *func, int err)
 			if (log_file)
 				fclose(log_file);
 			log_file = NULL;
-			log_fd = -1;
+			AUDIT_ATOMIC_STORE(log_fd, -1);
 			logging_suspended = 1;
 			break;
 		case FA_SINGLE:
@@ -1230,19 +1234,19 @@ static void rotate_logs(unsigned int num_logs, unsigned int keep_logs)
 	/* Close audit file. fchmod and fchown errors are not fatal because we
 	 * already adjusted log file permissions and ownership when opening the
 	 * log file. */
-	if (log_fd >= 0) {
-		if (fchmod(log_fd, config->log_group ? S_IRUSR|S_IRGRP :
+	if (AUDIT_ATOMIC_LOAD(log_fd) >= 0) {
+		if (fchmod(AUDIT_ATOMIC_LOAD(log_fd), config->log_group ? S_IRUSR|S_IRGRP :
 			  S_IRUSR) < 0){
 		    audit_msg(LOG_WARNING, "Couldn't change permissions while "
 			"rotating log file (%s)", strerror(errno));
 		}
-		if (fchown(log_fd, 0, config->log_group) < 0) {
+		if (fchown(AUDIT_ATOMIC_LOAD(log_fd), 0, config->log_group) < 0) {
 		    audit_msg(LOG_WARNING, "Couldn't change ownership while "
 			"rotating log file (%s)", strerror(errno));
 		}
 	}
 	if (log_file) {
-		log_fd = -1;
+		AUDIT_ATOMIC_STORE(log_fd, -1);
 		fclose(log_file);
 		log_file = NULL;
 	}
@@ -1443,7 +1447,7 @@ retry:
 		return 1;
 	}
 
-	log_fd = lfd;
+	AUDIT_ATOMIC_STORE(log_fd, lfd);
 	log_file = fdopen(lfd, "a");
 	if (log_file == NULL) {
 		audit_msg(LOG_CRIT, "Error setting up log descriptor (%s)",
@@ -1774,7 +1778,7 @@ static void reconfigure(struct auditd_event *e)
 		 * having to call check_log_file_size to restore it. */
 		int saved_suspend = logging_suspended;
 
-		setup_percentages(oconf, log_fd);
+		setup_percentages(oconf, AUDIT_ATOMIC_LOAD(log_fd));
 		fs_space_warning = 0;
 		fs_admin_space_warning = 0;
 		fs_space_left = 1;

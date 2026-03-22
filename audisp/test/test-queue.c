@@ -100,6 +100,72 @@ struct prod_arg {
 	struct disp_conf *conf;
 };
 
+struct resize_prod_arg {
+	struct disp_conf *conf;
+	unsigned int start;
+	unsigned int count;
+};
+
+struct resize_cons_arg {
+	unsigned int start;
+	unsigned int count;
+	unsigned int resize_after;
+	unsigned int resize_size;
+	int failed;
+};
+
+static void *resize_handshake_producer(void *a)
+{
+	struct resize_prod_arg *pa = a;
+	unsigned int i;
+
+	for (i = 0; i < pa->count; i++) {
+		event_t *e;
+		char buf[32];
+
+		snprintf(buf, sizeof(buf), "resize-%06u", pa->start + i);
+		e = make_event(buf);
+		if (!e)
+			return NULL;
+
+		while (enqueue(e, pa->conf) == 1) {
+			e = make_event(buf);
+			if (!e)
+				return NULL;
+		}
+	}
+
+	return NULL;
+}
+
+static void *resize_handshake_consumer(void *a)
+{
+	struct resize_cons_arg *ca = a;
+	unsigned int i;
+
+	for (i = 0; i < ca->count; i++) {
+		event_t *e;
+		char buf[32];
+
+		e = dequeue();
+		if (!e) {
+			ca->failed = 1;
+			return NULL;
+		}
+		snprintf(buf, sizeof(buf), "resize-%06u", ca->start + i);
+		if (strcmp(e->data, buf) != 0) {
+			ca->failed = 1;
+			free(e);
+			return NULL;
+		}
+		free(e);
+		if (i + 1 == ca->resize_after)
+			increase_queue_depth(ca->resize_size);
+	}
+
+	return NULL;
+}
+
 static void *producer(void *a)
 {
 	struct prod_arg *pa = a;
@@ -239,6 +305,157 @@ out_f:
 	return rc;
 }
 
+static int resize_wrap_test(void)
+{
+	struct disp_conf conf;
+	event_t *e = NULL;
+	char buf[32];
+	int i, rc = 1;
+
+	memset(&conf, 0, sizeof(conf));
+	conf.overflow_action = O_IGNORE;
+
+	if (init_queue(100)) {
+		fprintf(stderr, "resize_wrap_test: init_queue failed\n");
+		return rc;
+	}
+
+	/* Fill the ring so the next enqueue sequence can wrap it. */
+	for (i = 0; i < 100; i++) {
+		snprintf(buf, sizeof(buf), "event-%03d", i);
+		e = make_event(buf);
+		if (!e || enqueue(e, &conf)) {
+			fprintf(stderr, "resize_wrap_test: enqueue failed\n");
+			goto out_q;
+		}
+		e = NULL;
+	}
+
+	for (i = 0; i < 80; i++) {
+		snprintf(buf, sizeof(buf), "event-%03d", i);
+		e = dequeue();
+		if (!e) {
+			fprintf(stderr, "resize_wrap_test: queue underflow\n");
+			goto out_q;
+		}
+		if (strcmp(e->data, buf) != 0) {
+			fprintf(stderr, "resize_wrap_test: initial data mismatch\n");
+			goto out_free;
+		}
+		free(e);
+		e = NULL;
+	}
+
+	/* Add more entries so the live data spans the end and start. */
+	for (i = 100; i < 120; i++) {
+		snprintf(buf, sizeof(buf), "event-%03d", i);
+		e = make_event(buf);
+		if (!e || enqueue(e, &conf)) {
+			fprintf(stderr,
+				"resize_wrap_test: wrapped enqueue failed\n");
+			goto out_q;
+		}
+		e = NULL;
+	}
+
+	/* Growing a wrapped ring must not strand the entries at slot 0. */
+	increase_queue_depth(200);
+
+	/* The consumer should still see the wrapped entries in FIFO order. */
+	for (i = 80; i < 120; i++) {
+		snprintf(buf, sizeof(buf), "event-%03d", i);
+		e = dequeue();
+		if (!e) {
+			fprintf(stderr,
+				"resize_wrap_test: queue underflow after resize\n");
+			goto out_q;
+		}
+		if (strcmp(e->data, buf) != 0) {
+			fprintf(stderr,
+				"resize_wrap_test: data mismatch after resize\n");
+			goto out_free;
+		}
+		free(e);
+		e = NULL;
+	}
+
+	if (queue_current_depth() != 0) {
+		fprintf(stderr, "resize_wrap_test: depth not zero\n");
+		goto out_q;
+	}
+
+	rc = 0;
+out_free:
+	free(e);
+out_q:
+	destroy_queue();
+	return rc;
+}
+
+static int resize_handshake_test(void)
+{
+	/*
+	 * Verify the real auditd threading model: one producer thread races with
+	 * one dispatcher thread that both dequeues and performs the grow. The
+	 * producer retries any event dropped while processing_suspended is set,
+	 * so every logical event still has to be dequeued exactly once. The old
+	 * resize path could lose copied entries or let enqueue() write into the
+	 * freed ring array.
+	 */
+	struct disp_conf conf;
+	struct resize_prod_arg pa = { .conf = &conf, .start = 0, .count = 2000 };
+	struct resize_cons_arg ca = {
+		.start = 0,
+		.count = 2000,
+		.resize_after = 128,
+		.resize_size = 512,
+		.failed = 0,
+	};
+	pthread_t prod;
+	pthread_t disp;
+	int rc = 1;
+
+	memset(&conf, 0, sizeof(conf));
+	conf.overflow_action = O_IGNORE;
+
+	if (init_queue(64)) {
+		fprintf(stderr, "resize_handshake_test: init_queue failed\n");
+		return rc;
+	}
+
+	if (pthread_create(&disp, NULL, resize_handshake_consumer, &ca)) {
+		fprintf(stderr,
+			"resize_handshake_test: dispatcher thread create failed\n");
+		goto out_q;
+	}
+	if (pthread_create(&prod, NULL, resize_handshake_producer, &pa)) {
+		fprintf(stderr,
+			"resize_handshake_test: producer thread create failed\n");
+		pthread_cancel(disp);
+		pthread_join(disp, NULL);
+		goto out_q;
+	}
+
+	pthread_join(prod, NULL);
+	pthread_join(disp, NULL);
+
+	if (ca.failed) {
+		fprintf(stderr,
+			"resize_handshake_test: consumer observed bad data\n");
+		goto out_q;
+	}
+	if (queue_current_depth() != 0) {
+		fprintf(stderr,
+			"resize_handshake_test: depth not zero after drain\n");
+		goto out_q;
+	}
+
+	rc = 0;
+out_q:
+	destroy_queue();
+	return rc;
+}
+
 int main(void)
 {
 	const char *srcdir = getenv("srcdir") ? getenv("srcdir") : ".";
@@ -247,10 +464,13 @@ int main(void)
 
 	if (basic_test(path))
 		return 1;
+	if (resize_wrap_test())
+		return 1;
 	if (persist_test(path))
+		return 1;
+	if (resize_handshake_test())
 		return 1;
 	if (concurrency_test(path))
 		return 1;
 	return 0;
 }
-

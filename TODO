@@ -1,6 +1,7 @@
 Future roadmap (subject to change):
 ===================================
 4.1
+* Copy audisp-remote persistence method to audisp/queue.c
 * Multi-thread audisp-remote
 * Look into lazy parsing of audit records in auparse
 * Basic HIDS based on reactive audit component

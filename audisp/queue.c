@@ -29,24 +29,59 @@
 #include <syslog.h>
 #include <string.h>
 #include <fcntl.h>
+#include <sched.h>
 #include "queue.h"
 #include "common.h"
 
 /*
- * Audisp uses a simple ring buffer to pass events from auditd to its
- * plugin dispatcher thread.  The goal is to avoid blocking producers
- * and consumers on a mutex.  The semaphore below tracks how many events
- * are queued while the atomic indices maintain the next slot to use for
- * enqueueing and dequeueing. A mutex is only required when the queue is
- * resized. The queue is not safe for multiple producers. Atomic load/store of
- * the index alone does not guarantee exclusive access to a ring buffer entry.
- * A compare‑exchange or other reservation mechanism (or simply a mutex) is
- * required to make the queue race‑free. However, auditd is the only producer
- * and audisp is the only consumer, so the queue is safe in practice.
+ * Audisp uses a single-producer / single-consumer ring buffer to pass events
+ * from the auditd main thread to the audisp dispatcher thread. The producer is
+ * enqueue(), which runs on the same libev thread that handles SIGHUP and sets
+ * need_queue_depth_change. The consumer is dequeue(), which runs on the
+ * dispatcher thread; that same dispatcher thread is also the only thread that
+ * calls increase_queue_depth(). The transient config-loading thread never
+ * touches the queue.
+ *
+ * The queue's normal producer/consumer synchronization is driven by the
+ * semaphore below. enqueue() stores the event in the ring and then posts the
+ * semaphore; dequeue() waits on that semaphore before reading the next entry.
+ * Because only one thread advances q_next and only one thread advances q_last,
+ * the indices need only atomic load/store operations in the steady state.
+ *
+ * A resize needs additional synchronization because the resizer must copy the
+ * live entries out of the old array and then free that array while enqueue()
+ * may be trying to publish another event. The semaphore does not help there:
+ * it orders producer vs. consumer visibility of queued events, but it does not
+ * prevent the producer from writing into the old ring while the dispatcher is
+ * copying or freeing it.
+ *
+ * To make the grow path race-free, enqueue() and increase_queue_depth() use a
+ * two-flag handshake. enqueue() first stores enqueue_in_progress = 1 and then
+ * loads processing_suspended. increase_queue_depth() first stores
+ * processing_suspended = 1 and then loads enqueue_in_progress until it sees 0.
+ * Under HAVE_ATOMIC both operations use memory_order_seq_cst so the C11 memory
+ * model gives them one total order. That total order rules out the bad case
+ * where enqueue() misses processing_suspended while increase_queue_depth()
+ * simultaneously misses enqueue_in_progress: at least one side must observe the
+ * other side's store and back off. Once the resizer sees
+ * enqueue_in_progress == 0 after publishing processing_suspended == 1, no
+ * producer is still writing into the old array, so the copy and free are safe.
+ *
+ * The spin in increase_queue_depth() is bounded. enqueue_in_progress only spans
+ * the tiny critical section that stores an event pointer, advances q_next,
+ * updates accounting, optionally mirrors the event to the persistence file, and
+ * posts the semaphore. It does not include any allocation or retry loop, so in
+ * practice the dispatcher spins for at most a few instructions or a brief
+ * sched_yield().
+ *
+ * The old queue_lock mutex was removed because it never serialized the real
+ * producer/resizer race. There is only one resizer, since the dispatcher thread
+ * alone calls increase_queue_depth(), and higher-level reconfiguration already
+ * ensures only one config thread runs at a time via config_lock. A separate
+ * resize mutex therefore provided no useful protection.
  */
 
 static volatile event_t **q;
-static pthread_mutex_t queue_lock;
 static sem_t queue_nonempty;
 /*
  * q_next points to the next free slot for the producer.
@@ -60,7 +95,9 @@ extern ATOMIC_INT disp_hup;
 static unsigned int q_next, q_last; /* Fallback when atomics are absent */
 extern volatile ATOMIC_INT disp_hup;
 #endif
-static unsigned int q_depth, processing_suspended, overflowed;
+static ATOMIC_UNSIGNED q_depth, overflowed;
+static ATOMIC_UNSIGNED processing_suspended;
+static ATOMIC_UNSIGNED enqueue_in_progress;
 static ATOMIC_UNSIGNED currently_used, max_used;
 static int queue_full_warning = 0;
 static int persist_fd = -1;
@@ -69,8 +106,46 @@ static int persist_sync = 0;
 
 void reset_suspended(void)
 {
-	processing_suspended = 0;
+	AUDIT_ATOMIC_STORE(processing_suspended, 0);
 	queue_full_warning = 0;
+}
+
+/*
+ * Increment the queue depth counter and preserve the largest value seen.
+ * The max update is best-effort and uses compare-exchange to avoid losing
+ * concurrent updates from the producer and consumer threads.
+ */
+static unsigned int increase_used_count(void)
+{
+	unsigned int used;
+	unsigned int max;
+
+#ifdef HAVE_ATOMIC
+	used = atomic_fetch_add_explicit(&currently_used, 1,
+			memory_order_relaxed) + 1;
+	max = atomic_load_explicit(&max_used, memory_order_relaxed);
+	while (used > max &&
+	       !atomic_compare_exchange_weak_explicit(&max_used, &max, used,
+			memory_order_relaxed, memory_order_relaxed))
+		;
+#else
+	used = ++currently_used;
+	if (used > max_used)
+		max_used = used;
+#endif
+	return used;
+}
+
+/*
+ * Decrement the queue depth counter after the consumer removes an event.
+ */
+static void decrease_used_count(void)
+{
+#ifdef HAVE_ATOMIC
+	atomic_fetch_sub_explicit(&currently_used, 1, memory_order_relaxed);
+#else
+	currently_used--;
+#endif
 }
 
 static int queue_load_file(int fd)
@@ -83,7 +158,7 @@ static int queue_load_file(int fd)
 	if (fd < 0)
 		return -1;
 
-	if (q_depth == 0) {
+	if (AUDIT_ATOMIC_LOAD(q_depth) == 0) {
 		syslog(LOG_ERR, "Queue depth is zero, cannot restore queue");
 		return -1;
 	}
@@ -96,7 +171,8 @@ static int queue_load_file(int fd)
 		return -1;
 	}
 
-	while (count < q_depth && fgets(buf, sizeof(buf), f)) {
+	while (count < AUDIT_ATOMIC_LOAD(q_depth) &&
+	       fgets(buf, sizeof(buf), f)) {
 		event_t *e = calloc(1, sizeof(*e));
 		if (e == NULL)
 			break;
@@ -110,15 +186,15 @@ static int queue_load_file(int fd)
 	}
 
 	#ifdef HAVE_ATOMIC
-	atomic_store_explicit(&q_next, count % q_depth, memory_order_relaxed);
+	atomic_store_explicit(&q_next,
+		count % AUDIT_ATOMIC_LOAD(q_depth), memory_order_relaxed);
 	atomic_store_explicit(&q_last, 0, memory_order_relaxed);
 	#else
-	q_next = count % q_depth;
+	q_next = count % AUDIT_ATOMIC_LOAD(q_depth);
 	q_last = 0;
 	#endif
-	currently_used = count;
-	if (max_used < count)
-		max_used = count;
+	AUDIT_ATOMIC_STORE(currently_used, count);
+	AUDIT_ATOMIC_STORE(max_used, count);
 
 	fclose(f);
 	return 0;
@@ -133,28 +209,29 @@ int init_queue_extended(unsigned int size, int flags, const char *path)
 	// queue was destroyed due to lack of plugins, q_depth,
 	// as well as other queue variables, is set to zero so
 	// they do not need reinitializing.
-	if (q_depth == 0) {
+	if (AUDIT_ATOMIC_LOAD(q_depth) == 0) {
 		unsigned int i;
 
-		q_depth = size;
-		q = malloc(q_depth * sizeof(event_t *));
+		AUDIT_ATOMIC_STORE(q_depth, size);
+		q = malloc(AUDIT_ATOMIC_LOAD(q_depth) * sizeof(event_t *));
 		if (q == NULL) {
-			processing_suspended = 1;
+			AUDIT_ATOMIC_STORE(processing_suspended, 1);
 			return -1;
 		}
 
-		for (i=0; i < q_depth; i++)
+		for (i=0; i < AUDIT_ATOMIC_LOAD(q_depth); i++)
 			q[i] = NULL;
 
 		/* Setup IPC mechanisms */
-		pthread_mutex_init(&queue_lock, NULL);
 		sem_init(&queue_nonempty, 0, 0);
 #ifdef HAVE_ATOMIC
 		atomic_init(&q_next, 0);
 		atomic_init(&q_last, 0);
+		atomic_init(&enqueue_in_progress, 0);
 #else
 		q_next = 0;
 		q_last = 0;
+		enqueue_in_progress = 0;
 #endif
 		reset_suspended();
 	}
@@ -181,7 +258,7 @@ int init_queue(unsigned int size)
 static int do_overflow_action(struct disp_conf *config)
 {
 	int rc = -1;
-	overflowed = 1;
+	AUDIT_ATOMIC_STORE(overflowed, 1);
         switch (config->overflow_action)
         {
                 case O_IGNORE:
@@ -202,7 +279,7 @@ static int do_overflow_action(struct disp_conf *config)
                 case O_SUSPEND:
                         syslog(LOG_ALERT,
                             "Auditd is suspending event passing to plugins due to overflowing its queue.");
-                        processing_suspended = 1;
+                        AUDIT_ATOMIC_STORE(processing_suspended, 1);
                         break;
                 case O_SINGLE:
                         syslog(LOG_ALERT,
@@ -231,14 +308,44 @@ int enqueue(event_t *e, struct disp_conf *config)
 {
 	unsigned int n, retry_cnt = 0;
 
-	if (processing_suspended) {
+	/*
+	 * First half of the producer/resizer handshake: publish that enqueue()
+	 * is entering the ring-buffer write path before reading
+	 * processing_suspended. The seq_cst store/load pair is required so the
+	 * resizer cannot miss this store after making its own seq_cst store.
+	 */
+#ifdef HAVE_ATOMIC
+	atomic_store_explicit(&enqueue_in_progress, 1, memory_order_seq_cst);
+	/*
+	 * If the resizer has already suspended processing, abort before touching
+	 * the ring. Clearing enqueue_in_progress on this path tells the resizer
+	 * that this enqueue() did not write into the old array, so dropping the
+	 * event through the normal overflow/suspend path is safe.
+	 */
+	if (atomic_load_explicit(&processing_suspended, memory_order_seq_cst)) {
+		atomic_store_explicit(&enqueue_in_progress, 0,
+			memory_order_seq_cst);
 		free(e);
 		return 1;
 	}
+#else
+	enqueue_in_progress = 1;
+	if (processing_suspended) {
+		enqueue_in_progress = 0;
+		free(e);
+		return 1;
+	}
+#endif
 
 retry:
 	/* We allow 3 retries and then its over */
 	if (retry_cnt > 3) {
+#ifdef HAVE_ATOMIC
+		atomic_store_explicit(&enqueue_in_progress, 0,
+			memory_order_seq_cst);
+#else
+		enqueue_in_progress = 0;
+#endif
 		free(e);
 		do_overflow_action(config);
 		return 1;
@@ -251,9 +358,10 @@ retry:
 	* matching acquire barrier.  Because the threads synchronize on
 	* the semaphore, a relaxed load of q_next is sufficient here.
 	*/
-	n = atomic_load_explicit(&q_next, memory_order_relaxed) % q_depth;
+	n = atomic_load_explicit(&q_next, memory_order_relaxed) %
+		AUDIT_ATOMIC_LOAD(q_depth);
 #else
-	n = q_next % q_depth;
+	n = q_next % AUDIT_ATOMIC_LOAD(q_depth);
 #endif
 	if (q[n] == NULL) {
 		q[n] = e;
@@ -266,23 +374,34 @@ retry:
 		* guarantees the consumer sees the event before noticing that
 		* q_next advanced.
 		*/
-		atomic_store_explicit(&q_next, (n+1) % q_depth,
+		atomic_store_explicit(&q_next,
+			(n+1) % AUDIT_ATOMIC_LOAD(q_depth),
 			memory_order_release);
 #else
-		q_next = (n+1) % q_depth;
+		q_next = (n+1) % AUDIT_ATOMIC_LOAD(q_depth);
 #endif
-		currently_used++;
-		if (currently_used > max_used)
-			max_used = currently_used;
+		increase_used_count();
 		if (persist_fd >= 0) {
 			if (write(persist_fd, e->data, e->hdr.size) < 0) {
 				/* Log error but continue - persistence is not critical */
-				syslog(LOG_WARNING, "Failed to write event to persistent queue");
+				syslog(LOG_WARNING,
+					"Failed to write event to persistent queue");
 			}
 			if (persist_sync)
 				fdatasync(persist_fd);
 		}
 		sem_post(&queue_nonempty);
+#ifdef HAVE_ATOMIC
+		/*
+		 * The ring-buffer write is now complete. If increase_queue_depth()
+		 * was spinning on enqueue_in_progress, this seq_cst clear lets it
+		 * proceed knowing the old array is no longer being written.
+		 */
+		atomic_store_explicit(&enqueue_in_progress, 0,
+			memory_order_seq_cst);
+#else
+		enqueue_in_progress = 0;
+#endif
 	} else {
 		struct timespec ts;
 		ts.tv_sec = 0;
@@ -309,9 +428,10 @@ static event_t *dequeue_common(void)
 	* barrier for the producer's sem_post().  Because of that
 	* synchronization a relaxed load of the consumer index is safe here.
 	*/
-	n = atomic_load_explicit(&q_last, memory_order_relaxed) % q_depth;
+	n = atomic_load_explicit(&q_last, memory_order_relaxed) %
+		AUDIT_ATOMIC_LOAD(q_depth);
 #else
-	n = q_last % q_depth;
+	n = q_last % AUDIT_ATOMIC_LOAD(q_depth);
 #endif
 
 	if (q[n] != NULL) {
@@ -324,12 +444,13 @@ static event_t *dequeue_common(void)
 		* producer's sem_wait(), so the semaphore again provides the
 		* cross-thread ordering needed for the queue operations.
 		*/
-		atomic_store_explicit(&q_last, (n+1) % q_depth,
+		atomic_store_explicit(&q_last,
+			(n+1) % AUDIT_ATOMIC_LOAD(q_depth),
 			memory_order_release);
 #else
-		q_last = (n+1) % q_depth;
+		q_last = (n+1) % AUDIT_ATOMIC_LOAD(q_depth);
 #endif
-		currently_used--;
+		decrease_used_count();
 	} else
 		e = NULL;
 
@@ -350,7 +471,8 @@ event_t *dequeue_timed(const struct timespec *timeout)
 	int result;
 
 	/* Wait until there is something in the queue */
-	while ((result = sem_timedwait(&queue_nonempty, timeout)) == -1 && errno == EINTR)
+	while ((result = sem_timedwait(&queue_nonempty, timeout)) == -1 &&
+	       errno == EINTR)
 		;
 
 	if (result == -1)
@@ -366,58 +488,125 @@ void nudge_queue(void)
 
 void increase_queue_depth(unsigned int size)
 {
-	pthread_mutex_lock(&queue_lock);
-	if (size > q_depth) {
-		unsigned int i;
-		void *tmp_q;
+	if (size > AUDIT_ATOMIC_LOAD(q_depth)) {
+		volatile event_t **tmp_q;
+		unsigned int count, i, old_depth, old_last;
 
-		tmp_q = realloc(q, size * sizeof(event_t *));
+#ifdef HAVE_ATOMIC
+		/*
+		 * First half of the resizer/producers handshake: publish that the
+		 * queue is suspended before checking enqueue_in_progress. seq_cst
+		 * makes this store visible in the same total order as enqueue()'s
+		 * seq_cst load, so one side must observe the other's store.
+		 */
+		atomic_store_explicit(&processing_suspended, 1,
+			memory_order_seq_cst);
+		/*
+		 * Once this spin sees enqueue_in_progress == 0 after suspending the
+		 * queue, no producer is mid-write into the old ring allocation.
+		 * That invariant makes the copy, free, and pointer swap below safe.
+		 */
+		while (atomic_load_explicit(&enqueue_in_progress,
+			memory_order_seq_cst))
+			sched_yield();
+#else
+		processing_suspended = 1;
+		while (enqueue_in_progress)
+			sched_yield();
+#endif
+		old_depth = AUDIT_ATOMIC_LOAD(q_depth);
+		count = AUDIT_ATOMIC_LOAD(currently_used);
+#ifdef HAVE_ATOMIC
+		old_last = atomic_load_explicit(&q_last,
+				memory_order_relaxed) % old_depth;
+#else
+		old_last = q_last % old_depth;
+#endif
+
+		tmp_q = calloc(size, sizeof(event_t *));
 		if (tmp_q == NULL) {
 			fprintf(stderr, "Out of Memory. Check %s file, %d line",
 				__FILE__, __LINE__);
-			pthread_mutex_unlock(&queue_lock);
+#ifdef HAVE_ATOMIC
+			atomic_store_explicit(&processing_suspended, 0,
+				memory_order_seq_cst);
+#else
+			processing_suspended = 0;
+#endif
 			return;
 		}
+
+		/*
+		 * Preserve FIFO order across a grow. Once the ring has wrapped,
+		 * simply extending the backing array strands the entries stored
+		 * at the start of the old allocation.
+		 */
+		for (i = 0; i < count; i++)
+			tmp_q[i] = q[(old_last + i) % old_depth];
+
+		/*
+		 * The handshake guarantees no thread still holds a writable path into
+		 * the old ring array, so freeing it here cannot race with enqueue().
+		 */
+		free((void *)q);
 		q = tmp_q;
-		for (i=q_depth; i<size; i++)
-			q[i] = NULL;
-		q_depth = size;
-		overflowed = 0;
+		AUDIT_ATOMIC_STORE(q_depth, size);
+#ifdef HAVE_ATOMIC
+		atomic_store_explicit(&q_last, 0, memory_order_relaxed);
+		atomic_store_explicit(&q_next, count, memory_order_relaxed);
+#else
+		q_last = 0;
+		q_next = count;
+#endif
+		AUDIT_ATOMIC_STORE(overflowed, 0);
+#ifdef HAVE_ATOMIC
+		/*
+		 * Re-open the queue after publishing the new array pointer and depth.
+		 * New enqueue() calls that pass the handshake will now observe the
+		 * resized ring buffer state.
+		 */
+		atomic_store_explicit(&processing_suspended, 0,
+			memory_order_seq_cst);
+#else
+		processing_suspended = 0;
+#endif
 	}
-	pthread_mutex_unlock(&queue_lock);
 }
 
 void write_queue_state(FILE *f)
 {
-	fprintf(f, "current plugin queue depth = %u\n", currently_used);
-	fprintf(f, "max plugin queue depth used = %u\n", max_used);
-	fprintf(f, "plugin queue size = %u\n", q_depth);
+	fprintf(f, "current plugin queue depth = %u\n",
+		AUDIT_ATOMIC_LOAD(currently_used));
+	fprintf(f, "max plugin queue depth used = %u\n",
+		AUDIT_ATOMIC_LOAD(max_used));
+	fprintf(f, "plugin queue size = %u\n", AUDIT_ATOMIC_LOAD(q_depth));
 	fprintf(f, "plugin queue overflow detected = %s\n",
-				overflowed ? "yes" : "no");
+				AUDIT_ATOMIC_LOAD(overflowed) ? "yes" : "no");
 	fprintf(f, "plugin queueing suspended = %s\n",
-				processing_suspended ? "yes" : "no");
+				AUDIT_ATOMIC_LOAD(processing_suspended) ?
+				"yes" : "no");
 }
 
 void resume_queue(void)
 {
-	processing_suspended = 0;
+	AUDIT_ATOMIC_STORE(processing_suspended, 0);
 }
 
 void destroy_queue(void)
 {
 	unsigned int i;
 
-	for (i=0; i<q_depth; i++)
+	for (i=0; i<AUDIT_ATOMIC_LOAD(q_depth); i++)
 		free((void *)q[i]);
 
 	free(q);
-	pthread_mutex_destroy(&queue_lock);
 	sem_destroy(&queue_nonempty);
 	if (persist_fd >= 0) {
-		if (currently_used == 0) {
+		if (AUDIT_ATOMIC_LOAD(currently_used) == 0) {
 			if (ftruncate(persist_fd, 0) < 0) {
 				/* Log error but continue - cleanup is not critical */
-				syslog(LOG_WARNING, "Failed to truncate persistent queue file");
+				syslog(LOG_WARNING,
+					"Failed to truncate persistent queue file");
 			}
 		}
 		close(persist_fd);
@@ -431,29 +620,30 @@ void destroy_queue(void)
 	*/
 	atomic_store_explicit(&q_next, 0, memory_order_relaxed);
 	atomic_store_explicit(&q_last, 0, memory_order_relaxed);
+	atomic_store_explicit(&enqueue_in_progress, 0, memory_order_relaxed);
 #else
 	q_next = 0;
 	q_last = 0;
+	enqueue_in_progress = 0;
 #endif
-	q_depth = 0;
-	processing_suspended = 1;
-	currently_used = 0;
-	max_used = 0;
-	overflowed = 0;
+	AUDIT_ATOMIC_STORE(q_depth, 0);
+	AUDIT_ATOMIC_STORE(processing_suspended, 1);
+	AUDIT_ATOMIC_STORE(currently_used, 0);
+	AUDIT_ATOMIC_STORE(max_used, 0);
+	AUDIT_ATOMIC_STORE(overflowed, 0);
 }
 
 unsigned int queue_current_depth(void)
 {
-       return currently_used;
+	return AUDIT_ATOMIC_LOAD(currently_used);
 }
 
 unsigned int queue_max_depth(void)
 {
-       return max_used;
+	return AUDIT_ATOMIC_LOAD(max_used);
 }
 
 int queue_overflowed_p(void)
 {
-       return overflowed;
+	return AUDIT_ATOMIC_LOAD(overflowed);
 }
-

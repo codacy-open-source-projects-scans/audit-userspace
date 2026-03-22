@@ -231,6 +231,7 @@ static void cont_handler(struct ev_loop *loop, struct ev_signal *sig,
 			int revents)
 {
 	char buf[64];
+	struct tm tm;
 	mode_t u = umask(0137);	// allow 0640
 	FILE *f = fopen(state_file, "w");
 	umask(u);
@@ -246,7 +247,7 @@ static void cont_handler(struct ev_loop *loop, struct ev_signal *sig,
 		}
 	fprintf(f, "audit version = %s\n", VERSION);
 	time_t now = time(0);
-	strftime(buf, sizeof(buf), "%x %X", localtime(&now));
+	strftime(buf, sizeof(buf), "%x %X", localtime_r(&now, &tm));
 	fprintf(f, "current time = %s\n", buf);
 	fprintf(f, "process priority = %d\n", getpriority(PRIO_PROCESS, 0));
 	write_logging_state(f);

@@ -3634,24 +3634,8 @@ unknown:
 				// Its here just in the off chance someone
 				// actually put a control character in a key.
 				char *dest = malloc(len + 1 + (3*cnt));
-				if (dest) {
-					// Because need_escaping was called
-					// terminated, we need to do the same
-					// incase there's a Ctl-A in the key.
-					// This is likely fuzzer induced.
-					char tmp;
-					sep = strchr(mutable,
-						     AUDIT_KEY_SEPARATOR);
-					if (sep) {
-						tmp = *sep;
-						*sep = 0;
-						key_escape(mutable, dest,
-							   escape_mode);
-						*sep = tmp;
-					} else
-						key_escape(mutable, dest,
-							   escape_mode);
-				}
+				if (dest)
+					key_escape(mutable, dest, escape_mode);
 				free(mutable);
 				free((void *)out);
 				out = dest;
