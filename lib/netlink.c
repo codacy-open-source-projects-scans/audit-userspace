@@ -77,7 +77,7 @@ void audit_close(int fd)
 int audit_get_reply(int fd, struct audit_reply *rep, reply_t block, int peek)
 {
 	int len;
-	struct sockaddr_nl nladdr;
+	struct sockaddr_nl nladdr = { 0 };
 	socklen_t nladdrlen = sizeof(nladdr);
 
 	if (fd < 0)
@@ -299,4 +299,3 @@ retry:
 	}
 	return 0;
 }
-

@@ -1,6 +1,14 @@
 4.1.4
 - Update syscalls and io_uring tables for the 7.0 kernel (Hilko Bengen)
 - Code cleanups (mikhailnov)
+- Avoid blocking auditd while handling disk space alerts
+- Tighten auditctl permission checks and rule deletion handling
+- Fix ausearch and auparse parsing for several newer record types
+- Prevent queue resize races in audisp and oversize records in af_unix
+- Fix memory safety issues in auparse and the audisp filter plugin
+- Improve reliability of audisp-remote, auplugin, and the ids plugin
+- Fix stats collection and parsing in the audisp-statsd plugin
+- Refresh ausearch and aureport man pages
 
 4.1.3
 - Reduce memory churn in the af_unix plugin

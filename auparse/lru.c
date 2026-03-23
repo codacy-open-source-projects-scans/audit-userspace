@@ -297,19 +297,26 @@ static void free_qnode(Queue *queue, QNode *node)
 
 static void evict_lru(Queue *queue)
 {
+	QNode *node;
+
 	if (queue_is_empty(queue))
 		return;
-	free_qnode(queue, queue->end);
+
+	node = queue->end;
+	free_qnode(queue, node);
 	queue->evictions++;
 }
 
 // Remove from the end of the queue
 static void dequeue(Queue *queue)
 {
+	QNode *node;
+
 	if (queue_is_empty(queue))
 		return;
 
-	free_qnode(queue, queue->end);
+	node = queue->end;
+	free_qnode(queue, node);
 }
 
 

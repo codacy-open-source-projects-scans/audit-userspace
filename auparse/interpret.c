@@ -148,6 +148,9 @@ static unsigned char x2c(const unsigned char *buf)
 	const char *ptr;
 	unsigned char total=0;
 
+	if (buf == NULL || buf[0] == 0 || buf[1] == 0)
+		return 0;
+
 	ptr = strchr(AsciiArray, (char)toupper(buf[0]));
 	if (ptr)
 		total = (unsigned char)(((ptr-AsciiArray) & 0x0F)<<4);

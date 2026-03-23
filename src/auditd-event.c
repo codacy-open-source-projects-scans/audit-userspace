@@ -300,6 +300,21 @@ static void replace_event_msg(struct auditd_event *e, const char *buf)
 }
 
 /*
+ * Cap snprintf's return value to the bytes actually stored in format_buf.
+ * nlen is the number of bytes that would have been written, limit is the
+ * destination buffer size passed to snprintf, and the return value is the
+ * number of bytes available in format_buf excluding the trailing NUL.
+ */
+static int clamp_format_len(int nlen, size_t limit)
+{
+	if (nlen < 1)
+		return 0;
+	if ((size_t)nlen >= limit)
+		return limit - 1;
+	return nlen;
+}
+
+/*
 * This function will take an audit structure and return a
 * text buffer that's formatted for writing to disk. If there is
 * an error the return value is 0 and the format_buf is truncated.
@@ -309,19 +324,24 @@ static int format_raw(const struct audit_reply *rep)
 {
 	char *ptr;
 	int nlen;
+	size_t limit;
 
 	format_buf[0] = 0;
 
 	if (rep == NULL) {
-		if (config->node_name_format != N_NONE)
-			nlen = snprintf(format_buf, FORMAT_BUF_LEN - 32,
+		if (config->node_name_format != N_NONE) {
+			limit = FORMAT_BUF_LEN - 32;
+			nlen = snprintf(format_buf, limit,
 		"node=%s type=DAEMON_ERR op=format-raw msg=NULL res=failed",
                                 config->node_name);
-		else
-			nlen = snprintf(format_buf, MAX_AUDIT_MESSAGE_LENGTH,
+		} else {
+			limit = MAX_AUDIT_MESSAGE_LENGTH;
+			nlen = snprintf(format_buf, limit,
 			  "type=DAEMON_ERR op=format-raw msg=NULL res=failed");
+		}
 
-		if (nlen < 1)
+		nlen = clamp_format_len(nlen, limit);
+		if (nlen == 0)
 			return 0;
 	} else {
 		int len;
@@ -343,16 +363,19 @@ static int format_raw(const struct audit_reply *rep)
 
 		// Note: This can truncate messages if
 		// MAX_AUDIT_MESSAGE_LENGTH is too small
-		if (config->node_name_format != N_NONE)
-			nlen = snprintf(format_buf, FORMAT_BUF_LEN - 32,
+		if (config->node_name_format != N_NONE) {
+			limit = FORMAT_BUF_LEN - 32;
+			nlen = snprintf(format_buf, limit,
 				"node=%s type=%s msg=%.*s",
                                 config->node_name, type, len, message);
-		else
-		        nlen = snprintf(format_buf,
-				MAX_AUDIT_MESSAGE_LENGTH - 32,
+		} else {
+			limit = MAX_AUDIT_MESSAGE_LENGTH - 32;
+		        nlen = snprintf(format_buf, limit,
 				"type=%s msg=%.*s", type, len, message);
+		}
 
-		if (nlen < 1)
+		nlen = clamp_format_len(nlen, limit);
+		if (nlen == 0)
 			return 0;
 
 	        /* Replace \n with space so it looks nicer. */
@@ -479,6 +502,8 @@ static const char *format_enrich(const struct audit_reply *rep)
 		mlen = format_raw(rep);
 
 		// How much room is left?
+		if (mlen >= FORMAT_BUF_LEN)
+			return format_buf;
 		len = FORMAT_BUF_LEN - mlen;
 		if (len <= MIN_SPACE_LEFT)
 			return format_buf;

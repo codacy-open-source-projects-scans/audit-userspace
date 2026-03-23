@@ -524,9 +524,10 @@ auparse_state_t *auparse_init(ausource_t source, const void *b)
 			if (bb == NULL)
 				goto bad_exit;
 			size = 0;
-			for (n = 0; (buf = bb[n]); n++) {
-				len = strlen(bb[n]);
-				if (bb[n][len-1] != '\n') {
+			for (n = 0; bb[n]; n++) {
+				buf = bb[n];
+				len = strlen(buf);
+				if (buf[len-1] != '\n') {
 					size += len + 1;
 				} else {
 					size += len;
@@ -1487,6 +1488,11 @@ static int au_auparse_next_event(auparse_state_t *au)
 	event_list_t *l;
 	au_event_t e;
 
+	if (au == NULL || au->au_lo == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	/*
 	 * Deal with Python memory management issues where it issues a
 	 * auparse_destroy() call after an auparse_init() call but then wants
@@ -1500,8 +1506,11 @@ static int au_auparse_next_event(auparse_state_t *au)
 #ifdef	LOL_EVENTS_DEBUG01
 		if (debug) printf("Creating lol array\n");
 #endif	/* LOL_EVENTS_DEBUG01 */
-		au_lol_create(au->au_lo);
+		if (au_lol_create(au->au_lo) == NULL)
+			return -1;
 	}
+	if (au->au_lo->array == NULL)
+		return -1;
 
 	/*
 	 * First see if we have any empty events but with an allocated event

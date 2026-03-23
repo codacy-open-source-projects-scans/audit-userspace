@@ -1,4 +1,4 @@
-.TH AUREPORT "8" "February 2023" "Red Hat" "System Administration Utilities"
+.TH AUREPORT "8" "March 2026" "Red Hat" "System Administration Utilities"
 .SH NAME
 aureport \- a tool that produces summary reports of audit daemon logs
 .SH SYNOPSIS
@@ -27,11 +27,19 @@ Report about crypto events
 .BR \-\-debug
 Write malformed events that are skipped to stderr.
 .TP
+.BR \-\-delete
+When used with configuration, integrity, or MAC reports, only include
+delete or remove operations.
+.TP
 .BR \-\-eoe\-timeout \ \fIseconds\fP
 Set the end of event parsing timeout. See \fBend_of_event_timeout\fP in \fIauditd.conf(5)\fP for details. Note that setting this value will override any configured value found in /etc/auditd/auditd.conf.
 .TP
 .BR \-e ,\  \-\-event
 Report about events
+.TP
+.BR \-\-add
+When used with configuration, integrity, or MAC reports, only include
+add or create operations.
 .TP
 .BR \-\-escape \ \fIoption\fP
 This option determines if the output is escaped to make the content safer for certain uses. The options are \fIraw\fP , \fItty\fP , \fIshell\fP , and \fIshell_quote\fP. Each mode includes the characters of the preceding mode and escapes more characters. That is to say \fIshell\fP includes all characters escaped by \fItty\fP and adds more. \fItty\fP is the default.
