@@ -184,10 +184,11 @@ static PyMemberDef AuEvent_members[] = {
 };
 
 static char *
-fmt_event(time_t seconds, unsigned int milli, unsigned long serial, const char *host)
+fmt_event(time_t seconds, unsigned int milli, unsigned long serial,
+	  const char *host)
 {
     static char buf1[200], buf2[200];
-    char fmt[] = "%a %b %d %H:%M:%S.%%ld %Y serial=%%ld host=%%s";
+    char fmt[] = "%a %b %d %H:%M:%S.%%u %Y serial=%%ld host=%%s";
     struct tm *tmp;
 
     tmp = localtime(&seconds);

@@ -1843,20 +1843,29 @@ static int max_restarts_parser(const struct nv_pair *nv, int line,
 static int plugin_dir_parser(const struct nv_pair *nv, int line,
 		struct daemon_conf *config)
 {
+	char *tmp;
+
 	audit_msg(LOG_DEBUG, "plugin_dir_parser called with: %s", nv->value);
 
-	if (nv->value == NULL)
-		config->plugin_dir = NULL;
-	else {
-		size_t len = strlen(nv->value);
+	if (nv->value == NULL) {
 		free(config->plugin_dir);
-		config->plugin_dir = malloc(len + 2);
-		if (config->plugin_dir) {
-			strcpy(config->plugin_dir, nv->value);
-			if (len > 1 && config->plugin_dir[len - 1] != '/')
-				config->plugin_dir[len] = '/';
-			config->plugin_dir[len + 1] = 0;
+		config->plugin_dir = NULL;
+	} else {
+		size_t len = strlen(nv->value);
+
+		tmp = malloc(len + 2);
+		if (tmp == NULL) {
+			audit_msg(LOG_ERR,
+				"Out of memory setting plugin_dir - line %d",
+				line);
+			return 1;
 		}
+		strcpy(tmp, nv->value);
+		if (len > 1 && tmp[len - 1] != '/')
+			tmp[len++] = '/';
+		tmp[len] = 0;
+		free(config->plugin_dir);
+		config->plugin_dir = tmp;
 	}
 	return 0;
 }

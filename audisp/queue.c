@@ -37,9 +37,10 @@
  * Audisp uses a single-producer / single-consumer ring buffer to pass events
  * from the auditd main thread to the audisp dispatcher thread. The producer is
  * enqueue(), which runs on the same libev thread that handles SIGHUP and sets
- * need_queue_depth_change. The consumer is dequeue(), which runs on the
- * dispatcher thread; that same dispatcher thread is also the only thread that
- * calls increase_queue_depth(). The transient config-loading thread never
+ * need_queue_depth_change. Note that the libev thread multiplexes the netlink
+ * and network originating events. The consumer is dequeue(), which runs on
+ * the dispatcher thread; that same dispatcher thread is also the only thread
+ * that calls increase_queue_depth(). The transient config-loading thread never
  * touches the queue.
  *
  * The queue's normal producer/consumer synchronization is driven by the
