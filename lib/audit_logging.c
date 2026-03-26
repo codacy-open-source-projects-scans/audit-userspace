@@ -39,6 +39,7 @@
 
 #define TTY_PATH	32
 #define MAX_USER	((UT_NAMESIZE * 2) + 8)
+#define EXENAME_SIZE	((PATH_MAX * 2) + 1)
 
 // NOTE: The kernel fills in pid, uid, and loginuid of sender. Therefore,
 // these routines do not need to send them.
@@ -179,8 +180,15 @@ static char *_get_exename(char *exename, int size)
 		audit_msg(LOG_ERR, "get_exename: cannot determine executable");
 	} else {
 		tmp[res] = '\0';
-		if (audit_value_needs_encoding(tmp, res))
+		if (audit_value_needs_encoding(tmp, res)) {
+			if (((res * 2) + 1) > size) {
+				strcpy(exename, "\"?\"");
+				audit_msg(LOG_ERR,
+					"get_exename: encoded executable name too long");
+				return exename;
+			}
 			return audit_encode_value(exename, tmp, res);
+		}
 		snprintf(exename, size, "\"%s\"", tmp);
 	}
 	return exename;
@@ -294,7 +302,7 @@ int audit_log_user_message(int audit_fd, int type, const char *message,
 {
 	char buf[MAX_AUDIT_MESSAGE_LENGTH];
 	char addrbuf[INET6_ADDRSTRLEN];
-	static char exename[PATH_MAX*2]="";
+	static char exename[EXENAME_SIZE]="";
 	char ttyname[TTY_PATH];
 	const char *success;
 	int ret;
@@ -371,7 +379,7 @@ int audit_log_user_comm_message(int audit_fd, int type, const char *message,
 {
 	char buf[MAX_AUDIT_MESSAGE_LENGTH];
 	char addrbuf[INET6_ADDRSTRLEN];
-	static char exename[PATH_MAX*2]="";
+	static char exename[EXENAME_SIZE]="";
 	char commname[PATH_MAX*2];
 	char ttyname[TTY_PATH];
 	const char *success;
@@ -456,7 +464,7 @@ int audit_log_acct_message(int audit_fd, int type, const char *pgname,
 	const char *success;
 	char buf[MAX_AUDIT_MESSAGE_LENGTH];
 	char addrbuf[INET6_ADDRSTRLEN];
-	static char exename[PATH_MAX*2] = "";
+	static char exename[EXENAME_SIZE] = "";
 	char ttyname[TTY_PATH];
 	int ret;
 
@@ -558,7 +566,7 @@ int audit_log_user_avc_message(int audit_fd, int type, const char *message,
 {
 	char buf[MAX_AUDIT_MESSAGE_LENGTH];
 	char addrbuf[INET6_ADDRSTRLEN];
-	static char exename[PATH_MAX*2] = "";
+	static char exename[EXENAME_SIZE] = "";
 	char ttyname[TTY_PATH];
 	int retval;
 
@@ -639,7 +647,7 @@ int audit_log_semanage_message(int audit_fd, int type, const char *pgname,
 	const char *success;
 	char buf[MAX_AUDIT_MESSAGE_LENGTH];
 	char addrbuf[INET6_ADDRSTRLEN];
-	static char exename[PATH_MAX*2] = "";
+	static char exename[EXENAME_SIZE] = "";
 	char ttyname[TTY_PATH];
 	int ret;
 
@@ -746,7 +754,7 @@ int audit_log_user_command(int audit_fd, int type, const char *command,
 	char commname[PATH_MAX*2];
 	char cwdname[PATH_MAX*2];
 	char ttyname[TTY_PATH];
-	static char exename[PATH_MAX*2] = "";
+	static char exename[EXENAME_SIZE] = "";
 	char format[64];
 	const char *success;
 	char *cmd;
@@ -832,4 +840,3 @@ int audit_log_user_command(int audit_fd, int type, const char *command,
 		errno = ret;
 	return ret;
 }
-
