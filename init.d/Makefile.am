@@ -32,6 +32,7 @@ EXTRA_DIST = auditd.service.in audit-rules.service.in augenrules.in \
 libconfig = libaudit.conf
 initdir = $(prefix)/lib/systemd/system
 legacydir = $(libexecdir)/initscripts/legacy-actions/auditd
+bashcompdir = $(datadir)/bash-completion/completions
 
 auditdir = $(sysconfdir)/audit
 auditrdir = $(auditdir)/rules.d
@@ -53,12 +54,12 @@ install-data-hook:
 
 install-exec-hook:
 	mkdir -p ${DESTDIR}${initdir}
-	mkdir -p ${DESTDIR}${sysconfdir}/bash_completion.d
+	mkdir -p ${DESTDIR}${bashcompdir}
 	$(INSTALL_SCRIPT) -D -m 644 ${builddir}/auditd.service ${DESTDIR}${initdir}
 	$(INSTALL_SCRIPT) -D -m 644 ${builddir}/audit-rules.service ${DESTDIR}${initdir}
 	chmod 0755 $(DESTDIR)$(sbindir)/augenrules
 	$(INSTALL_SCRIPT) -D -m 644 ${srcdir}/audit.bash_completion \
-		${DESTDIR}${sysconfdir}/bash_completion.d/
+		${DESTDIR}${bashcompdir}
 if INSTALL_LEGACY_ACTIONS
 	mkdir -p ${DESTDIR}${legacydir}
 	$(INSTALL_SCRIPT) -D -m 750 ${srcdir}/auditd.rotate ${DESTDIR}${legacydir}/rotate
@@ -84,4 +85,4 @@ if INSTALL_LEGACY_ACTIONS
 	rm ${DESTDIR}${legacydir}/condrestart
 endif
 	rm ${DESTDIR}$(prefix)/lib/tmpfiles.d/audit.conf
-	rm ${DESTDIR}${sysconfdir}/bash_completion.d/audit.bash_completion
+	rm ${DESTDIR}${bashcompdir}/audit.bash_completion

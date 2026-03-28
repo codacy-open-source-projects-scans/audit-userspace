@@ -1,5 +1,5 @@
 # Bash completion for audit utilities
-# Installed to /etc/bash_completion.d/audit
+# Installed to /usr/share/bash-completion/completions/
 
 _ausearch_opts="--event --arch --comm --debug --checkpoint --eoe-timeout \
 --exit --escape --extra-keys --extra-labels --extra-obj2 --extra-time \
