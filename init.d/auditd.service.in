@@ -33,6 +33,7 @@ Type=forking
 PIDFile=@runstatedir@/audit/auditd.pid
 ExecStart=@sbindir@/auditd
 Restart=on-failure
+KillMode=mixed
 ## Do not restart for intentional exits. See EXIT CODES section in auditd(8).
 RestartPreventExitStatus=2 4 6
 
